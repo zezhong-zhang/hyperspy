@@ -1616,6 +1616,12 @@ class BaseSetMetadataItems(t.HasTraits):
             if getattr(self, value) != t.Undefined:
                 self.signal.metadata.set_item(key, getattr(self, value))
 
+import sparse
+def shift_sparse_array(a, shift=0, axis=None):
+    shift_tuple = int(shift[0]), int(shift[1])
+    sparse.roll(a, shift_tuple, axis=axis)
+    # np.roll(a,int_shift,axis=axis) #numpy_array method
+    return a
 
 class BaseSignal(FancySlicing,
                  MVA,
@@ -1675,6 +1681,145 @@ class BaseSignal(FancySlicing,
             Arguments:
                 obj: The signal that owns the data.
             """, arguments=['obj'])
+
+    def alignSI(self, crop=True, fill_value=np.nan, shifts=None, expand=False, axis=None,
+                show_progressbar=None,
+                parallel=None):
+        """Align the images in place using user provided shifts or by
+        estimating the shifts.
+
+        Please, see `estimate_shift2D` docstring for details
+        on the rest of the parameters not documented in the following
+        section
+
+        Parameters
+        ----------
+        crop : bool
+            If True, the data will be cropped not to include regions
+            with missing data
+        fill_value : int, float, nan
+            The areas with missing data are filled with the given value.
+            Default is nan.
+        shifts : None or list of tuples
+            If None the shifts are estimated using
+            `estimate_shift2D`.
+        expand : bool
+            If True, the data will be expanded to fit all data after alignment.
+            Overrides `crop`.
+        interpolation_order: int, default 1.
+            The order of the spline interpolation. Default is 1, linear
+            interpolation.
+        %s
+
+        Returns
+        -------
+        shifts : np.array
+            The shifts are returned only if `shifts` is None
+
+        Notes
+        -----
+        The statistical analysis approach to the translation estimation
+        when using reference='stat' roughly follows [*]_ . If you use
+        it please cite their article.
+
+        References
+        ----------
+        .. [*] Bernhard Schaffer, Werner Grogger and Gerald Kothleitner.
+           “Automated Spatial Drift Correction for EFTEM Image Series.”
+           Ultramicroscopy 102, no. 1 (December 2004): 27–36.
+
+        """
+        self._check_signal_dimension_equals_three()
+        if show_progressbar is None:
+            show_progressbar = preferences.General.show_progressbar
+        if shifts is None:
+            raise Exception('You must provide the shifts, please determine one from imaging modes.')
+
+        if expand:
+            # Expand to fit all valid data
+            left, right = (int(np.floor(shifts[:, 1].min())) if
+                           shifts[:, 1].min() < 0 else 0,
+                           int(np.ceil(shifts[:, 1].max())) if
+                           shifts[:, 1].max() > 0 else 0)
+            top, bottom = (int(np.floor(shifts[:, 0].min())) if
+                           shifts[:, 0].min() < 0 else 0,
+                           int(np.ceil(shifts[:, 0].max())) if
+                           shifts[:, 0].max() > 0 else 0)
+            xaxis = self.axes_manager.signal_axes[0]
+            yaxis = self.axes_manager.signal_axes[1]
+            padding = []
+            for i in range(self.data.ndim):
+                if i == xaxis.index_in_array:
+                    padding.append((right, -left))
+                elif i == yaxis.index_in_array:
+                    padding.append((bottom, -top))
+                else:
+                    padding.append((0, 0))
+            self.data = np.pad(self.data, padding, mode='constant',
+                               constant_values=(fill_value,))
+            if left < 0:
+                xaxis.offset += left * xaxis.scale
+            if np.any((left < 0, right > 0)):
+                xaxis.size += right - left
+            if top < 0:
+                yaxis.offset += top * yaxis.scale
+            if np.any((top < 0, bottom > 0)):
+                yaxis.size += bottom - top
+
+        # Translate with sub-pixel precision if necesary
+        self._map_iterate(shift_sparse_array, iterating_kwargs=(('shift', -shifts),),
+                          ragged=False,
+                          axis=axis,
+                          parallel=parallel,
+                          show_progressbar=show_progressbar)
+        if crop and not expand:
+            # Crop the image to the valid size
+            shifts = -shifts
+            bottom, top = (int(np.floor(shifts[:, 0].min())) if
+                           shifts[:, 0].min() < 0 else None,
+                           int(np.ceil(shifts[:, 0].max())) if
+                           shifts[:, 0].max() > 0 else 0)
+            right, left = (int(np.floor(shifts[:, 1].min())) if
+                           shifts[:, 1].min() < 0 else None,
+                           int(np.ceil(shifts[:, 1].max())) if
+                           shifts[:, 1].max() > 0 else 0)
+            corp_axes = axis[0]+1, axis[1]+1
+            self.crop_image(top, bottom, left, right, corp_axes = corp_axes)
+            shifts = -shifts
+
+        self.events.data_changed.trigger(obj=self)
+
+
+    alignSI.__doc__ %= (PARALLEL_ARG)
+
+    def crop_image(self, top=None, bottom=None,
+                   left=None, right=None, convert_units=False, corp_axes=None):
+        """Crops an image in place.
+
+        Parameters
+        ----------
+        top, bottom, left, right : {int | float}
+            If int the values are taken as indices. If float the values are
+            converted to indices.
+        convert_units : bool
+            Default is False
+            If True, convert the signal units using the 'convert_to_units'
+            method of the 'axes_manager'. If False, does nothing.
+
+        See also
+        --------
+        crop
+
+        """
+        self._check_signal_dimension_equals_three()
+        self.crop(self.axes_manager.signal_axes[corp_axes[1]].index_in_axes_manager,
+                  top,
+                  bottom)
+        self.crop(self.axes_manager.signal_axes[corp_axes[0]].index_in_axes_manager,
+                  left,
+                  right)
+        if convert_units:
+            self.axes_manager.convert_units('signal')
 
     def _create_metadata(self):
         self.metadata = DictionaryTreeBrowser()
@@ -1770,6 +1915,10 @@ class BaseSignal(FancySlicing,
     def _check_signal_dimension_equals_two(self):
         if self.axes_manager.signal_dimension != 2:
             raise SignalDimensionError(self.axes_manager.signal_dimension, 2)
+
+    def _check_signal_dimension_equals_three(self):
+        if self.axes_manager.signal_dimension != 3:
+            raise SignalDimensionError(self.axes_manager.signal_dimension, 3)
 
     def _deepcopy_with_new_data(self, data=None, copy_variance=False):
         """Returns a deepcopy of itself replacing the data.
