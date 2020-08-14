@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2011 The HyperSpy developers
+# Copyright 2007-2020 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -26,6 +26,7 @@ import itertools
 import subprocess
 import os
 import warnings
+from tempfile import TemporaryDirectory
 from setuptools import setup, Extension, Command
 import sys
 
@@ -44,9 +45,9 @@ if v[0] != 3:
 setup_path = os.path.dirname(__file__)
 
 
-install_req = ['scipy>=0.15',
+install_req = ['scipy>=1.0.1',
                'matplotlib>=2.2.3',
-               'numpy>=1.10, !=1.13.0',
+               'numpy>=1.13.0',
                'traits>=4.5.0',
                'natsort',
                'requests',
@@ -56,16 +57,17 @@ install_req = ['scipy>=0.15',
                'h5py>=2.3',
                'python-dateutil>=2.5.0',
                'ipyparallel',
-               'dask[array]>=0.18, !=2.0',
-               'scikit-image>=0.13',
-               'pint>=0.8',
+               'dask[array]>2.0',
+               'scikit-image>=0.15',
+               'pint>=0.10',
                'statsmodels',
                'numexpr',
                'sparse',
                'imageio',
                'pyyaml',
                'PTable',
-               'tifffile>=2018.10.18',
+               'tifffile[all]>=2018.10.18',
+               'numba',
                ]
 
 extras_require = {
@@ -73,11 +75,12 @@ extras_require = {
     "gui-jupyter": ["hyperspy_gui_ipywidgets>=1.1.0"],
     "gui-traitsui": ["hyperspy_gui_traitsui>=1.1.0"],
     "mrcz": ["blosc>=1.5", 'mrcz>=0.3.6'],
-    "speed": ["numba", "cython"],
+    "speed": ["cython"],
     "usid": ["pyUSID>=0.0.7"],
     # bug in pip: matplotib is ignored here because it is already present in
     # install_requires.
-    "tests": ["pytest>=3.6", "pytest-mpl", "matplotlib>=3.1"],  # for testing
+    "tests": ["pytest>=3.6", "pytest-mpl", "matplotlib>=3.1"],
+    "coverage":["pytest-cov", "codecov"],
     # required to build the docs
     "build-doc": ["sphinx>=1.7", "sphinx_rtd_theme"],
 }
@@ -85,7 +88,7 @@ extras_require = {
 # Don't include "tests" and "docs" requirements since "all" is designed to be
 # used for user installation.
 runtime_extras_require = {x: extras_require[x] for x in extras_require.keys()
-                          if x not in ["tests", "build-doc"]}
+                          if x not in ["tests", "coverage", "build-doc"]}
 extras_require["all"] = list(itertools.chain(*list(
     runtime_extras_require.values())))
 
@@ -175,8 +178,9 @@ compiler = distutils.ccompiler.new_compiler()
 assert isinstance(compiler, distutils.ccompiler.CCompiler)
 distutils.sysconfig.customize_compiler(compiler)
 try:
-    compiler.compile([os.path.join(setup_path, 'hyperspy', 'misc', 'etc',
-                                   'test_compilers.c')])
+    with TemporaryDirectory() as tmpdir:
+        compiler.compile([os.path.join(setup_path, 'hyperspy', 'misc', 'etc',
+                                   'test_compilers.c')], output_dir=tmpdir)
 except (CompileError, DistutilsPlatformError):
     warnings.warn("""WARNING: C compiler can't be found.
 Only slow pure python alternative functions will be available.
@@ -271,8 +275,8 @@ with update_version_when_dev() as version:
                   'hyperspy.tests.datasets',
                   'hyperspy.tests.drawing',
                   'hyperspy.tests.io',
+                  'hyperspy.tests.learn',
                   'hyperspy.tests.model',
-                  'hyperspy.tests.mva',
                   'hyperspy.tests.samfire',
                   'hyperspy.tests.signal',
                   'hyperspy.tests.utils',
@@ -286,12 +290,13 @@ with update_version_when_dev() as version:
                   'hyperspy.misc.machine_learning',
                   'hyperspy.external',
                   'hyperspy.external.mpfit',
-                  'hyperspy.external.astroML',
+                  'hyperspy.external.astropy',
                   'hyperspy.samfire_utils',
                   'hyperspy.samfire_utils.segmenters',
                   'hyperspy.samfire_utils.weights',
                   'hyperspy.samfire_utils.goodness_of_fit_tests',
                   ],
+        python_requires='~=3.6',
         install_requires=install_req,
         tests_require=["pytest>=3.0.2"],
         extras_require=extras_require,
@@ -349,19 +354,23 @@ with update_version_when_dev() as version:
                 'tests/io/emd_files/fei_emd_files.zip',
                 'tests/io/protochips_data/*.npy',
                 'tests/io/protochips_data/*.csv',
-                'tests/signal/test_find_peaks1D_ohaver/test_find_peaks1D_ohaver.hdf5',
+                'tests/io/nexus_files/*.nxs',
+                'tests/io/empad_data/*.xml',
+                'tests/io/phenom_data/*.elid',
+                'tests/io/sur_data/*.pro',
+                'tests/io/sur_data/*.sur',
+                'tests/signal/data/test_find_peaks1D_ohaver.hdf5',
+                'tests/signal/data/*.hspy',
                 'hyperspy_extension.yaml',
             ],
         },
         author=Release.authors['all'][0],
-        author_email=Release.authors['all'][1],
-        maintainer='Francisco de la Peña',
-        maintainer_email='fjd29@cam.ac.uk',
         description=Release.description,
         long_description=open('README.rst').read(),
         license=Release.license,
         platforms=Release.platforms,
         url=Release.url,
+        project_urls=Release.PROJECT_URLS,
         keywords=Release.keywords,
         cmdclass={
             'recythonize': Recythonize,
@@ -370,6 +379,7 @@ with update_version_when_dev() as version:
             "Programming Language :: Python :: 3",
             "Programming Language :: Python :: 3.6",
             "Programming Language :: Python :: 3.7",
+            "Programming Language :: Python :: 3.8",
             "Development Status :: 4 - Beta",
             "Environment :: Console",
             "Intended Audience :: Science/Research",

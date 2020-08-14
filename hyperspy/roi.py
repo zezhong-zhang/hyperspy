@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2016 The HyperSpy developers
+# Copyright 2007-2020 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -108,7 +108,8 @@ class BaseROI(t.HasTraits):
         Utility to get the value ranges that the ROI would select.
 
         If the ROI is point base or is rectangluar in nature, these can be used
-        slice a signal. Extracted from `_make_slices` to ease implementation
+        to slice a signal. Extracted from
+        :py:meth:`~hyperspy.roi.BaseROI._make_slices` to ease implementation
         in inherited ROIs.
         """
         raise NotImplementedError()
@@ -152,8 +153,8 @@ class BaseROI(t.HasTraits):
     def __call__(self, signal, out=None, axes=None):
         """Slice the signal according to the ROI, and return it.
 
-        Arguments
-        ---------
+        Parameters
+        ----------
         signal : Signal
             The signal to slice with the ROI.
         out : Signal, default = None
@@ -163,13 +164,14 @@ class BaseROI(t.HasTraits):
         axes : specification of axes to use, default = None
             The axes argument specifies which axes the ROI will be applied on.
             The items in the collection can be either of the following:
-                * a tuple of:
-                    - DataAxis. These will not be checked with
-                      signal.axes_manager.
-                    - anything that will index signal.axes_manager
-                * For any other value, it will check whether the navigation
-                  space can fit the right number of axis, and use that if it
-                  fits. If not, it will try the signal space.
+
+            * a tuple of:
+
+              - DataAxis. These will not be checked with signal.axes_manager.
+              - anything that will index signal.axes_manager
+            * For any other value, it will check whether the navigation
+              space can fit the right number of axis, and use that if it
+              fits. If not, it will try the signal space.
         """
         if axes is None and signal in self.signal_map:
             axes = self.signal_map[signal][1]
@@ -197,27 +199,30 @@ class BaseROI(t.HasTraits):
 
     def _parse_axes(self, axes, axes_manager):
         """Utility function to parse the 'axes' argument to a list of
-        DataAxis.
+        :py:class:`~hyperspy.axes.DataAxis`.
 
-        Arguments
-        ---------
-        axes : specification of axes to use, default = None
+        Parameters
+        ----------
+        axes : specification of axes to use, default is None
             The axes argument specifies which axes the ROI will be applied on.
-            The DataAxis in the collection can be either of the following:
-                * a tuple of:
-                    - DataAxis. These will not be checked with
-                      signal.axes_manager.
-                    - anything that will index signal.axes_manager
-                * For any other value, it will check whether the navigation
-                  space can fit the right number of axis, and use that if it
-                  fits. If not, it will try the signal space.
-        axes_manager : AxesManager
+            The axes in the collection can be either of the following:
+
+            * a tuple of:
+
+              * :py:class:`~hyperspy.axes.DataAxis`. These will not be checked
+                with signal.axes_manager.
+              * anything that will index the signal
+                :py:class:`~hyperspy.axes.AxesManager`
+            * For any other value, it will check whether the navigation
+              space can fit the right number of axis, and use that if it
+              fits. If not, it will try the signal space.
+        axes_manager : :py:class:`~hyperspy.axes.AxesManager`
             The AxesManager to use for parsing axes, if axes is not already a
             tuple of DataAxis.
 
         Returns
         -------
-        [<DataAxis>]
+        :py:class:`~hyperspy.axes.DataAxis`
         """
         nd = self.ndim
         if isinstance(axes, (tuple, list)):
@@ -246,13 +251,17 @@ def _get_mpl_ax(plot, axes):
     The space of the first DataAxis in axes will be used to determine which
     plot's matplotlib Axes to return.
 
-    Arguments:
+    Parameters
     ----------
-        plot : MPL_HyperExplorer
-            The explorer that contains the navigation and signal plots
-        axes : collection of DataAxis
-            The axes to infer from.
+    plot : MPL_HyperExplorer
+        The explorer that contains the navigation and signal plots
+    axes : collection of DataAxis
+        The axes to infer from.
     """
+    if not plot.is_active:
+        raise RuntimeError("The signal needs to be plotted before using this "
+                           "function.")
+
     if axes[0].navigate:
         ax = plot.navigator_plot.ax
     else:
@@ -373,6 +382,7 @@ class BaseInteractiveROI(BaseROI):
                                 axes=kwargs.get("axes", None))
         if (self.update not in
                 signal.axes_manager.events.any_axis_changed.connected):
+            print('using interactive roi')
             signal.axes_manager.events.any_axis_changed.connect(
                 self.update,
                 [])
@@ -452,11 +462,10 @@ class BaseInteractiveROI(BaseROI):
         # Set DataAxes
         widget.axes = axes
         if widget.ax is None:
-            if signal._plot is None:
+            if signal._plot is None or signal._plot.signal_plot is None:
                 raise Exception(
-                    "%s does not have an active plot. Plot the signal before "
-                    "calling this method using its `plot` method." %
-                    repr(signal))
+                    f"{repr(signal)} does not have an active plot. Plot the "
+                    "signal before calling this method.")
 
             ax = _get_mpl_ax(signal._plot, axes)
             widget.set_mpl_ax(ax)
@@ -476,10 +485,17 @@ class BaseInteractiveROI(BaseROI):
         widget.events.closed.disconnect(self._remove_widget)
         widget.events.changed.disconnect(self._on_widget_change)
         widget.close()
+        print('removing widget')
         for signal, w in self.signal_map.items():
             if w[0] == widget:
                 self.signal_map.pop(signal)
                 break
+            # disconnect events which has been added when
+            if self.update in signal.axes_manager.events.any_axis_changed.connected:
+                signal.axes_manager.events.any_axis_changed.disconnect(
+                    self.update,
+                    [])
+
 
     def remove_widget(self, signal):
         if signal in self.signal_map:
@@ -539,7 +555,7 @@ class Point1DROI(BasePointROI):
     Example
     -------
 
-    >>> roi = hs.roi.Point1DROI(0.5) 
+    >>> roi = hs.roi.Point1DROI(0.5)
     >>> value, = roi
     >>> print(value)
     0.5

@@ -1,4 +1,5 @@
-# Copyright 2007-2016 The HyperSpy developers
+# -*- coding: utf-8 -*-
+# Copyright 2007-2020 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -139,7 +140,7 @@ def assert_warns(message=None, category=None):
         Regexes for the desired warning to catch
     category : (list of) type
         Warning categories for the desired warning to catch
-    
+
     Raises
     ------
     ValueError
@@ -186,12 +187,20 @@ def assert_warns(message=None, category=None):
             raise ValueError(msg)
 
 
+def check_closing_plot(s):
+    assert s._plot.signal_plot is None
+    assert s._plot.navigator_plot is None
+    # Ideally we should check all events
+    assert len(s.axes_manager.events.indices_changed.connected) == 0
+
+
 @simple_decorator
 def update_close_figure(function):
     def wrapper():
         signal = function()
         p = signal._plot
         p.close()
+        check_closing_plot(signal)
 
     return wrapper
 
@@ -214,11 +223,11 @@ def assert_deep_almost_equal(actual, expected, *args, **kwargs):
     expected: list, dict or tuple
         Expected values.
     *args :
-        Arguments are passed to :py:func:`numpy.testing.assert_allclose` or 
+        Arguments are passed to :py:func:`numpy.testing.assert_allclose` or
         :py:func:`assert_deep_almost_equal`.
     **kwargs :
-        Keyword arguments are passed to 
-        :py:func:`numpy.testing.assert_allclose` or 
+        Keyword arguments are passed to
+        :py:func:`numpy.testing.assert_allclose` or
         :py:func:`assert_deep_almost_equal`.
     """
     is_root = not '__trace' in kwargs

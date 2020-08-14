@@ -17,7 +17,6 @@
 # along with  HyperSpy.  If not, see <http://www.gnu.org/licenses/>.
 
 import math
-import numpy as np
 import sympy
 
 from hyperspy._components.expression import Expression
@@ -32,28 +31,28 @@ class Voigt(Expression):
 
     r"""Voigt component.
 
-    Symmetric peak shape based on the convolution of a Lorentzian and Normal 
+    Symmetric peak shape based on the convolution of a Lorentzian and Normal
     (Gaussian) distribution:
-    
-    .. math:: 
-        f(x) = G(x) \cdot L(x) 
 
-    where :math:`G(x)` is the Gaussian function and :math:`L(x)` is the 
-    Lorentzian function. In this case using an approximate formula by David 
+    .. math::
+        f(x) = G(x) \cdot L(x)
+
+    where :math:`G(x)` is the Gaussian function and :math:`L(x)` is the
+    Lorentzian function. In this case using an approximate formula by David
     (see Notes). This approximation improves on the pseudo-Voigt function
     (linear combination instead of convolution of the distributions) and is,
     to a very good approximation, equivalent to a Voigt function:
 
-    .. math:: 
+    .. math::
         z(x) &= \frac{x + i \gamma}{\sqrt{2} \sigma} \\
         w(z) &= \frac{e^{-z^2} \text{erfc}(-i z)}{\sqrt{2 \pi} \sigma} \\
         f(x) &= A \cdot \Re\left\{ w \left[ z(x - x_0) \right] \right\}
 
 
     ============== =============
-    Variable        Parameter 
+    Variable        Parameter
     ============== =============
-    :math:`x_0`     centre 
+    :math:`x_0`     centre
     :math:`A`       area
     :math:`\gamma`  gamma
     :math:`\sigma`  sigma
@@ -72,7 +71,7 @@ class Voigt(Expression):
         :math:`2 \sigma \sqrt{(2 \log(2))}` = FWHM of the Gaussian distribution.
 
 
-    For convenience the `gwidth` and `lwidth` attributes can also be used to 
+    For convenience the `gwidth` and `lwidth` attributes can also be used to
     set and get the FWHM of the Gaussian and Lorentzian parts of the
     distribution, respectively. For backwards compatability, `FWHM` is another
     alias for the Gaussian width.
@@ -84,7 +83,7 @@ class Voigt(Expression):
     """
 
     def __init__(self, centre=10., area=1., gamma=0.2, sigma=0.1,
-                 module="scipy", **kwargs):
+                 module=["numpy", "scipy"], **kwargs):
         # Not to break scripts once we remove the legacy Voigt
         if "legacy" in kwargs:
             del kwargs["legacy"]
@@ -118,7 +117,7 @@ class Voigt(Expression):
         self.convolved = True
 
     def estimate_parameters(self, signal, x1, x2, only_current=False):
-        """Estimate the Voigt function by calculating the momenta of the 
+        """Estimate the Voigt function by calculating the momenta of the
         Gaussian.
 
         Parameters
