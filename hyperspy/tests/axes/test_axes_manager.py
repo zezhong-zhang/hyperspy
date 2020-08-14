@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2016 The HyperSpy developers
+# Copyright 2007-2020 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -18,10 +18,11 @@
 
 from unittest import mock
 
-from hyperspy.axes import AxesManager, serpentine_iter
-from hyperspy.signals import BaseSignal, Signal1D, Signal2D
-from hyperspy.defaults_parser import preferences
 from numpy import arange, zeros
+
+from hyperspy.axes import AxesManager
+from hyperspy.defaults_parser import preferences
+from hyperspy.signals import BaseSignal, Signal1D, Signal2D
 
 
 class TestAxesManager:
