@@ -1,4 +1,4 @@
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -17,6 +17,7 @@
 
 import os
 from shutil import copyfile
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -37,40 +38,46 @@ style_pytest_mpl = 'default'
 style = ['default', 'overlap', 'cascade', 'mosaic', 'heatmap']
 
 
-@pytest.fixture
-def mpl_generate_path_cmdopt(request):
-    return request.config.getoption("--mpl-generate-path")
-
-
 def _generate_filename_list(style):
-    path = os.path.dirname(__file__)
-    filename_list = ['test_plot_spectra_%s' % s for s in style] + \
-                    ['test_plot_spectra_rev_%s' % s for s in style]
+    path = Path(__file__).resolve().parent
+    baseline_path = path.joinpath(baseline_dir)
+
+    filename_list = [f'test_plot_spectra_{s}' for s in style] + \
+                    [f'test_plot_spectra_rev_{s}' for s in style]
     filename_list2 = []
+
     for filename in filename_list:
         for i in range(0, 4):
-            filename_list2.append(os.path.join(path, baseline_dir,
-                                               '%s%i.png' % (filename, i)))
+            filename_list2.append(
+                baseline_path.joinpath(f'{filename}{i}.png')
+            )
+
     return filename_list2
 
 
 @pytest.fixture
 def setup_teardown(request, scope="class"):
-    mpl_generate_path_cmdopt = request.config.getoption("--mpl-generate-path")
+    try:
+        import pytest_mpl
+        # This option is available only when pytest-mpl is installed
+        mpl_generate_path_cmdopt = request.config.getoption("--mpl-generate-path")
+    except ImportError:
+        mpl_generate_path_cmdopt = None
+
     # SETUP
     # duplicate baseline images to match the test_name when the
     # parametrized 'test_plot_spectra' are run. For a same 'style', the
     # expected images are the same.
     if mpl_generate_path_cmdopt is None:
         for filename in _generate_filename_list(style):
-            copyfile("%s.png" % filename[:-5], filename)
+            copyfile(f"{str(filename)[:-5]}.png", filename)
     yield
     # TEARDOWN
     # Create the baseline images: copy one baseline image for each test
     # and remove the other ones.
     if mpl_generate_path_cmdopt:
         for filename in _generate_filename_list(style):
-            copyfile(filename, "%s.png" % filename[:-5])
+            copyfile(filename, f"{str(filename)[:-5]}.png")
     # Delete the images that have been created in 'setup_class'
     for filename in _generate_filename_list(style):
         os.remove(filename)
@@ -185,21 +192,47 @@ class TestPlotSpectra():
         return ax.get_figure()
 
 
-@update_close_figure
+class TestPlotNonLinearAxis:
+
+    def setup_method(self):
+        dict0 = {'size': 10, 'name': 'Axis0', 'units': 'A', 'scale': 0.2,
+                 'offset': 1, 'navigate': True}
+        dict1 = {'axis': np.arange(100)**3, 'name': 'Axis1', 'units': 'O',
+                 'navigate': False}
+        np.random.seed(1)
+        s = hs.signals.Signal1D(np.random.random((10, 100)),
+                                axes=[dict0, dict1])
+        self.s = s
+
+    @pytest.mark.mpl_image_compare(baseline_dir=baseline_dir,
+                                   tolerance=default_tol, style=style_pytest_mpl)
+    def test_plot_non_uniform_sig(self):
+        self.s.plot()
+        return self.s._plot.signal_plot.figure
+
+    @pytest.mark.mpl_image_compare(baseline_dir=baseline_dir,
+                                   tolerance=default_tol, style=style_pytest_mpl)
+    def test_plot_non_uniform_nav(self):
+        s2 = self.s.T
+        s2.plot()
+        return s2._plot.navigator_plot.figure
+
+
+@update_close_figure()
 def test_plot_nav0_close():
     test_plot = _TestPlot(ndim=0, sdim=1)
     test_plot.signal.plot()
     return test_plot.signal
 
 
-@update_close_figure
+@update_close_figure()
 def test_plot_nav1_close():
     test_plot = _TestPlot(ndim=1, sdim=1)
     test_plot.signal.plot()
     return test_plot.signal
 
 
-@update_close_figure
+@update_close_figure(check_data_changed_close=False)
 def test_plot_nav2_close():
     test_plot = _TestPlot(ndim=2, sdim=1)
     test_plot.signal.plot()
@@ -250,19 +283,20 @@ def test_plot_log_scale():
     return s._plot.signal_plot.figure
 
 
-@pytest.mark.parametrize(("ndim", "plot_type"),
-                         _generate_parameter())
+@pytest.mark.parametrize(("ndim", "plot_type"), _generate_parameter())
 @pytest.mark.mpl_image_compare(baseline_dir=baseline_dir,
                                tolerance=default_tol, style=style_pytest_mpl)
 def test_plot_two_cursors(ndim, plot_type):
     s = _test_plot_two_cursors(ndim=ndim)
+
     if plot_type == "sig":
-        return s._plot.signal_plot.figure
+        f = s._plot.signal_plot.figure
     else:
-        return s._plot.navigator_plot.figure
+        f= s._plot.navigator_plot.figure
+    return f
 
 
-@update_close_figure
+@update_close_figure(check_data_changed_close=False)
 def test_plot_nav2_sig1_two_cursors_close():
     return _test_plot_two_cursors(ndim=2)
 
@@ -288,7 +322,7 @@ def test_plot_with_non_finite_value():
 def test_plot_add_line_events():
     s = hs.signals.Signal1D(np.arange(100))
     s.plot()
-    assert len(s.axes_manager.events.indices_changed.connected) == 2
+    assert len(s.axes_manager.events.indices_changed.connected) == 1
     figure = s._plot.signal_plot
 
     def line_function(axes_manager=None):
@@ -297,14 +331,16 @@ def test_plot_add_line_events():
     line = Signal1DLine()
     line.data_function = line_function
     line.set_line_properties(color='blue', type='line', scaley=False)
-    figure.add_line(line)
+    figure.add_line(line, connect_navigation=True)
     line.plot()
     assert len(line.events.closed.connected) == 1
-    assert len(s.axes_manager.events.indices_changed.connected) == 3
+    assert len(s.axes_manager.events.indices_changed.connected) == 2
 
     line.close()
+    figure.close_right_axis()
+
     assert len(line.events.closed.connected) == 0
-    assert len(s.axes_manager.events.indices_changed.connected) == 2
+    assert len(s.axes_manager.events.indices_changed.connected) == 1
 
     figure.close()
     assert len(s.axes_manager.events.indices_changed.connected) == 0

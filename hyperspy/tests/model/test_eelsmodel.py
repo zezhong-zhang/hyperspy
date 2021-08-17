@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -89,7 +89,7 @@ class TestCreateEELSModel:
         ll.axes_manager[-1].offset = -20
         ll.axes_manager.navigation_shape = (123,)
         with pytest.raises(ValueError):
-            m = self.s.create_model(ll=ll)
+            _ = self.s.create_model(ll=ll)
 
 
 @lazifyTestClass
@@ -137,7 +137,7 @@ class TestEELSModel:
 
     def test_two_area_powerlaw_estimation_BC(self):
         self.m.signal.data = 2. * self.m.axis.axis ** (-3)  # A= 2, r=3
-        self.m.signal.metadata.Signal.binned = False
+        #self.m.signal.axes_manager[-1].is_binned = False
         self.m.two_area_background_estimation()
         np.testing.assert_allclose(
             self.m._background_components[0].A.value,
@@ -149,7 +149,7 @@ class TestEELSModel:
     def test_two_area_powerlaw_estimation_C(self):
         self.m["B_K"].active = False
         self.m.signal.data = 2. * self.m.axis.axis ** (-3)  # A= 2, r=3
-        self.m.signal.metadata.Signal.binned = False
+        #self.m.signal.axes_manager[-1].is_binned = False
         self.m.two_area_background_estimation()
         np.testing.assert_allclose(
             self.m._background_components[0].A.value,
@@ -162,7 +162,8 @@ class TestEELSModel:
         self.m["B_K"].active = False
         self.m["C_K"].active = False
         self.m.signal.data = 2. * self.m.axis.axis ** (-3)  # A= 2, r=3
-        self.m.signal.metadata.Signal.binned = False
+        print(self.m.signal.axes_manager[-1].is_binned)
+        #self.m.signal.axes_manager[-1].is_binned = False
         self.m.two_area_background_estimation()
         np.testing.assert_allclose(
             self.m._background_components[0].A.value,
@@ -210,7 +211,7 @@ class TestFitBackground:
         self.m["B_K"].active = False
         self.m.fit_background()
         np.testing.assert_allclose(self.m["Offset"].offset.value,
-                        1.71212121212)
+                        1.7142857)
         assert not self.m["B_K"].active
         assert self.m["C_K"].active
 
@@ -219,6 +220,6 @@ class TestFitBackground:
         self.m["C_K"].active = False
         self.m.fit_background()
         np.testing.assert_allclose(self.m["Offset"].offset.value,
-                        2.13567839196)
+                        2.14)
         assert not self.m["B_K"].active
         assert not self.m["C_K"].active

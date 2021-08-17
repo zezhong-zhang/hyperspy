@@ -1,4 +1,4 @@
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -36,17 +36,47 @@ def test_plot_BackgroundRemoval():
     pl.r.value = 3
     s = signals.Signal1D(pl.function(np.arange(100, 200)))
     s.axes_manager[0].offset = 100
+    s.add_poissonian_noise(random_state=1)
 
     br = BackgroundRemoval(s,
                            background_type='Power Law',
                            polynomial_order=2,
-                           fast=True,
+                           fast=False,
                            plot_remainder=True)
 
-    br.span_selector.set_initial((105, 115))
+    br.span_selector.set_initial((105, 150))
     br.span_selector.onmove_callback()
+    br.span_selector_changed()
 
     return br.signal._plot.signal_plot.figure
+
+
+def test_plot_BackgroundRemoval_close_figure():
+    s = signals.Signal1D(np.arange(1000).reshape(10, 100))
+    br = BackgroundRemoval(s, background_type='Gaussian')
+    signal_plot = s._plot.signal_plot
+
+    assert len(signal_plot.events.closed.connected) == 5
+    assert len(s.axes_manager.events.indices_changed.connected) == 4
+    s._plot.close()
+    assert not br._fit in s.axes_manager.events.indices_changed.connected
+    assert not br.disconnect in signal_plot.events.closed.connected
+
+
+def test_plot_BackgroundRemoval_close_tool():
+    s = signals.Signal1D(np.arange(1000).reshape(10, 100))
+    br = BackgroundRemoval(s, background_type='Gaussian')
+    br.span_selector.set_initial((20, 40))
+    br.span_selector.onmove_callback()
+    br.span_selector_changed()
+    signal_plot = s._plot.signal_plot
+
+    assert len(signal_plot.events.closed.connected) == 5
+    assert len(s.axes_manager.events.indices_changed.connected) == 4
+    br.on_disabling_span_selector()
+    assert not br._fit in s.axes_manager.events.indices_changed.connected
+    s._plot.close()
+    assert not br.disconnect in signal_plot.events.closed.connected
 
 
 @pytest.mark.mpl_image_compare(baseline_dir=BASELINE_DIR,

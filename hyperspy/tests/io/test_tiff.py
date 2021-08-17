@@ -4,6 +4,9 @@ import tempfile
 import numpy as np
 import pytest
 import traits.api as t
+from distutils.version import LooseVersion
+import tifffile
+
 
 import hyperspy.api as hs
 from hyperspy.misc.test_utils import assert_deep_almost_equal
@@ -385,8 +388,7 @@ FEI_Helios_metadata = {'Acquisition_instrument': {'SEM': {'Stage': {'rotation': 
                                    'authors': 'supervisor',
                                    'date': '2016-06-13',
                                    'time': '17:06:40'},
-                       'Signal': {'binned': False,
-                                  'signal_type': ''},
+                       'Signal': {'signal_type': ''},
                        '_HyperSpy': {'Folding': {'original_axes_manager': None,
                                                  'original_shape': None,
                                                  'signal_unfolded': False,
@@ -438,7 +440,7 @@ def test_read_Zeiss_SEM_scale_metadata_1k_image():
                       'original_filename': 'test_tiff_Zeiss_SEM_1k.tif',
                       'time': '09:40:32',
                       'title': ''},
-          'Signal': {'binned': False, 'signal_type': ''},
+          'Signal': {'signal_type': ''},
           '_HyperSpy': {'Folding': {'original_axes_manager': None,
                                     'original_shape': None,
                                     'signal_unfolded': False,
@@ -469,7 +471,7 @@ def test_read_Zeiss_SEM_scale_metadata_512_image():
                       'original_filename': 'test_tiff_Zeiss_SEM_512pix.tif',
                       'time': '08:20:42',
                       'title': ''},
-          'Signal': {'binned': False, 'signal_type': ''},
+          'Signal': {'signal_type': ''},
           '_HyperSpy': {'Folding': {'original_axes_manager': None,
                                     'original_shape': None,
                                     'signal_unfolded': False,
@@ -562,7 +564,7 @@ def test_read_TVIPS_metadata():
           'General': {'original_filename': 'TVIPS_bin4.tif',
                       'time': '9:01:17',
                       'title': ''},
-          'Signal': {'binned': False, 'signal_type': ''},
+          'Signal': {'signal_type': ''},
           '_HyperSpy': {'Folding': {'original_axes_manager': None,
                                     'original_shape': None,
                                     'signal_unfolded': False,
@@ -576,3 +578,69 @@ def test_read_TVIPS_metadata():
     np.testing.assert_allclose(s.axes_manager[0].scale, 1.42080, rtol=1E-5)
     np.testing.assert_allclose(s.axes_manager[1].scale, 1.42080, rtol=1E-5)
     assert_deep_almost_equal(s.metadata.as_dictionary(), md)
+
+
+def test_axes_metadata():
+    data = np.arange(2*5*10).reshape((2, 5, 10))
+    s = hs.signals.Signal2D(data)
+    nav_unit = 's'
+    s.axes_manager.navigation_axes[0].units = nav_unit
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = os.path.join(tmpdir, 'axes_metadata_default.tif')
+        s.save(fname)
+        s2 = hs.load(fname)
+        assert s2.axes_manager.navigation_axes[0].name == 'image series'
+        assert s2.axes_manager.navigation_axes[0].units == nav_unit
+        assert s2.axes_manager.navigation_axes[0].is_binned == False
+
+        fname2 = os.path.join(tmpdir, 'axes_metadata_IYX.tif')
+        s.save(fname2, metadata={'axes':'IYX'})
+        s3 = hs.load(fname2)
+        assert s3.axes_manager.navigation_axes[0].name == 'image series'
+        assert s3.axes_manager.navigation_axes[0].units == nav_unit
+        assert s3.axes_manager.navigation_axes[0].is_binned == False
+
+        fname2 = os.path.join(tmpdir, 'axes_metadata_ZYX.tif')
+        s.save(fname2, metadata={'axes':'ZYX'})
+        s3 = hs.load(fname2)
+        assert s3.axes_manager.navigation_axes[0].units == nav_unit
+        assert s3.axes_manager.navigation_axes[0].is_binned == False
+
+
+def test_olympus_SIS():
+    pytest.importorskip("imagecodecs", reason="imagecodecs is required")
+    fname = os.path.join(MY_PATH2, 'olympus_SIS.tif')
+    s = hs.load(fname)
+    # This olympus SIS contains two images:
+    # - the first one is a RGB 8-bits (used for preview purposes)
+    # - the second one is the raw data
+    # only the second one is calibrated.
+    assert len(s) == 2
+    am = s[1].axes_manager
+    for axis in am._axes:
+        assert axis.units == 'm'
+        np.testing.assert_allclose(axis.scale, 2.3928e-11)
+        np.testing.assert_allclose(axis.offset, 0.0)
+
+    for ima in s:
+        assert ima.data.shape == (101, 112)
+
+    assert s[1].data.dtype is np.dtype('uint16')
+
+
+def test_save_angstrom_units():
+    s = hs.signals.Signal2D(np.arange(200*200, dtype='float32').reshape((200, 200)))
+    for axis in s.axes_manager.signal_axes:
+        axis.units = 'Å'
+        axis.scale = 0.1
+        axis.offset = 10
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = os.path.join(tmpdir, 'save_angstrom_units.tif')
+        s.save(fname)
+        s2 = hs.load(fname)
+        if LooseVersion(tifffile.__version__) >= LooseVersion("2020.7.17"):
+            assert s2.axes_manager[0].units == s.axes_manager[0].units
+        assert s2.axes_manager[0].scale == s.axes_manager[0].scale
+        assert s2.axes_manager[0].offset == s.axes_manager[0].offset
+        assert s2.axes_manager[0].is_binned == s.axes_manager[0].is_binned

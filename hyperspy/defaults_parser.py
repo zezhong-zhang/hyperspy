@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -17,45 +17,46 @@
 # along with  HyperSpy.  If not, see <http://www.gnu.org/licenses/>.
 
 
-import os.path
+import os
 import configparser
 import logging
 
 import traits.api as t
 import matplotlib.pyplot as plt
 
-from hyperspy.misc.config_dir import config_path, os_name, data_path
+from pathlib import Path
+
+from hyperspy.misc.config_dir import config_path, data_path
 from hyperspy.misc.ipython_tools import turn_logging_on, turn_logging_off
 from hyperspy.ui_registry import add_gui_method
 
-defaults_file = os.path.join(config_path, 'hyperspyrc')
-eels_gos_files = os.path.join(data_path, 'EELS_GOS.tar.gz')
+defaults_file = Path(config_path, 'hyperspyrc')
+eels_gos_files = Path(data_path, 'EELS_GOS.tar.gz')
 
 _logger = logging.getLogger(__name__)
 
 
 def guess_gos_path():
-    if os_name == 'windows':
+    if os.name in ["nt", "dos"]:
         # If DM is installed, use the GOS tables from the default
         # installation
         # location in windows
         program_files = os.environ['PROGRAMFILES']
         gos = 'Gatan\\DigitalMicrograph\\EELS Reference Data\\H-S GOS Tables'
-        gos_path = os.path.join(program_files, gos)
+        gos_path = Path(program_files, gos)
 
         # Else, use the default location in the .hyperspy forlder
-        if os.path.isdir(gos_path) is False and \
-                'PROGRAMFILES(X86)' in os.environ:
+        if not gos_path.is_dir() and 'PROGRAMFILES(X86)' in os.environ:
             program_files = os.environ['PROGRAMFILES(X86)']
-            gos_path = os.path.join(program_files, gos)
-            if os.path.isdir(gos_path) is False:
-                gos_path = os.path.join(config_path, 'EELS_GOS')
+            gos_path = Path(program_files, gos)
+            if not gos_path.is_dir():
+                gos_path = Path(config_path, 'EELS_GOS')
     else:
-        gos_path = os.path.join(config_path, 'EELS_GOS')
+        gos_path = Path(config_path, 'EELS_GOS')
     return gos_path
 
 
-if os.path.isfile(defaults_file):
+if defaults_file.is_file():
     # Remove config file if obsolated
     with open(defaults_file) as f:
         if 'Not really' in f.readline():
@@ -169,6 +170,10 @@ class PlotConfig(t.HasTraits):
                                'ctrl+alt+shift'], label='Modifier key for 3rd and 4th dimensions')  # 0 elem is default
     modifier_dims_45 = t.Enum(['alt', 'ctrl', 'shift', 'ctrl+alt', 'ctrl+shift', 'alt+shift',
                                'ctrl+alt+shift'], label='Modifier key for 5th and 6th dimensions')  # 0 elem is default
+    pick_tolerance = t.CFloat(7.5,
+                              label='Pick tolerance',
+                              desc='The pick tolerance of ROIs in screen pixels.'
+                              )
 
 
 class EDSConfig(t.HasTraits):

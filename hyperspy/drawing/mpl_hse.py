@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -163,18 +163,14 @@ class MPL_HyperSignal1D_Explorer(MPL_HyperExplorer):
         rl.set_line_properties(color=self.right_pointer.color,
                                type='step')
         self.signal_plot.create_right_axis()
-        self.signal_plot.add_line(rl, ax='right')
+        self.signal_plot.add_line(rl, ax='right', connect_navigation=True)
         rl.plot_indices = True
         rl.text_position = (1., 1.05,)
         rl.plot(**kwargs)
         self.right_pointer_on = True
-        if hasattr(self.signal_plot.figure, 'tight_layout'):
-            try:
-                self.signal_plot.figure.tight_layout()
-            except BaseException:
-                # tight_layout is a bit brittle, we do this just in case it
-                # complains
-                pass
+        # because we added the right axis, we need to redraw the canvas to
+        # update the background
+        self.signal_plot.figure.canvas.draw_idle()
 
     def remove_right_pointer(self):
         for line in self.signal_plot.right_ax_lines:

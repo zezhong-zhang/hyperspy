@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -162,14 +162,14 @@ def optimal_fft_size(target, real=False):
 
         support_real = True
 
-    except ImportError:
+    except ImportError:  # pragma: no cover
         from scipy.fftpack import next_fast_len
 
         support_real = False
 
     if support_real:
         return next_fast_len(target, real)
-    else:
+    else:  # pragma: no cover
         return next_fast_len(target)
 
 

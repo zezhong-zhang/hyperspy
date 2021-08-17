@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -21,7 +21,8 @@ import functools
 import copy
 
 import numpy as np
-import scipy as sp
+from scipy import interpolate
+from scipy import signal as sp_signal
 import matplotlib.colors
 import matplotlib.pyplot as plt
 import matplotlib.text as mpl_text
@@ -30,7 +31,7 @@ import traits.api as t
 from hyperspy import drawing
 from hyperspy.docstrings.signal import HISTOGRAM_MAX_BIN_ARGS
 from hyperspy.exceptions import SignalDimensionError
-from hyperspy.axes import AxesManager, DataAxis
+from hyperspy.axes import AxesManager, UniformDataAxis
 from hyperspy.drawing.widgets import VerticalLineWidget
 from hyperspy import components1d
 from hyperspy.component import Component
@@ -40,6 +41,7 @@ from hyperspy.misc.label_position import SpectrumLabelPosition
 from hyperspy.misc.eels.tools import get_edges_near_energy, get_info_from_edges
 from hyperspy.drawing.figure import BlittedFigure
 from hyperspy.misc.array_tools import numba_histogram
+from hyperspy.misc.utils import is_binned # remove in v2.0
 
 
 _logger = logging.getLogger(__name__)
@@ -198,6 +200,8 @@ class Signal1DCalibration(SpanSelectorInSignal1D):
         if signal.axes_manager.signal_dimension != 1:
             raise SignalDimensionError(
                 signal.axes_manager.signal_dimension, 1)
+        if not isinstance(self.axis, UniformDataAxis):
+            raise NotImplementedError("The calibration tool supports only uniform axes.")
         self.units = self.axis.units
         self.scale = self.axis.scale
         self.offset = self.axis.offset
@@ -563,8 +567,11 @@ class Smoothing(t.HasTraits):
             pass
 
     def diff_model2plot(self, axes_manager=None):
-        smoothed = np.diff(self.model2plot(axes_manager),
-                           self.differential_order)
+        n = self.differential_order
+        smoothed = self.model2plot(axes_manager)
+        while n:
+            smoothed = np.gradient(smoothed, self.axis)
+            n -= 1
         return smoothed
 
     def close(self):
@@ -660,9 +667,9 @@ class SmoothingSavitzkyGolay(Smoothing):
 
 @add_gui_method(toolkey="hyperspy.Signal1D.smooth_lowess")
 class SmoothingLowess(Smoothing):
-    smoothing_parameter = t.Range(low=0.,
-                                  high=1.,
-                                  value=0.5,
+    smoothing_parameter = t.Range(low=0.001,
+                                  high=0.99,
+                                  value=0.1,
                                   )
     number_of_iterations = t.Range(low=1,
                                    value=1)
@@ -732,15 +739,15 @@ class ButterworthFilter(Smoothing):
         self.update_lines()
 
     def model2plot(self, axes_manager=None):
-        b, a = sp.signal.butter(self.order, self.cutoff_frequency_ratio,
+        b, a = sp_signal.butter(self.order, self.cutoff_frequency_ratio,
                                 self.type)
-        smoothed = sp.signal.filtfilt(b, a, self.signal())
+        smoothed = sp_signal.filtfilt(b, a, self.signal())
         return smoothed
 
     def apply(self):
-        b, a = sp.signal.butter(self.order, self.cutoff_frequency_ratio,
+        b, a = sp_signal.butter(self.order, self.cutoff_frequency_ratio,
                                 self.type)
-        f = functools.partial(sp.signal.filtfilt, b, a)
+        f = functools.partial(sp_signal.filtfilt, b, a)
         self.signal.map(f)
 
 
@@ -813,9 +820,11 @@ class ImageContrastEditor(t.HasTraits):
         self.norm_original = copy.deepcopy(self.norm)
 
         self.span_selector = None
-        self.span_selector_switch(on=True)
-
         self.plot_histogram()
+
+        # After the figure have been rendered to follow the same pattern as
+        # for other tools
+        self.span_selector_switch(on=True)
 
         if self.image.axes_manager is not None:
             self.image.axes_manager.events.indices_changed.connect(
@@ -830,9 +839,6 @@ class ImageContrastEditor(t.HasTraits):
 
     def create_axis(self):
         self.ax = self.hspy_fig.figure.add_subplot(111)
-        animated = self.hspy_fig.figure.canvas.supports_blit
-        self.ax.yaxis.set_animated(animated)
-        self.ax.xaxis.set_animated(animated)
         self.hspy_fig.ax = self.ax
 
     def _gamma_changed(self, old, new):
@@ -923,10 +929,11 @@ class ImageContrastEditor(t.HasTraits):
 
     def _set_xaxis(self):
         self.xaxis = np.linspace(self._vmin, self._vmax, self.bins)
-        # Set this attribute to restrict the span selector to the xaxis
-        self.span_selector.step_ax = DataAxis(size=len(self.xaxis),
-                                              offset=self.xaxis[1],
-                                              scale=self.xaxis[1]-self.xaxis[0])
+        if self.span_selector is not None:
+            # Set this attribute to restrict the span selector to the xaxis
+            self.span_selector.step_ax = UniformDataAxis(size=len(self.xaxis),
+                                                         offset=self.xaxis[1],
+                                                         scale=self.xaxis[1]-self.xaxis[0])
 
     def plot_histogram(self, max_num_bins=250):
         """Plot a histogram of the data.
@@ -968,10 +975,10 @@ class ImageContrastEditor(t.HasTraits):
         self.ax.set_ylim(0, self.hist_data.max())
         self.ax.set_xticks([])
         self.ax.set_yticks([])
-        self.line = self.ax.plot(*self._get_line(),
-                                       color='#ff7f0e')[0]
-        self.line.set_animated(self.ax.figure.canvas.supports_blit)
+        self.line = self.ax.plot(*self._get_line(), color='#ff7f0e',
+                                 animated=self.ax.figure.canvas.supports_blit)[0]
         plt.tight_layout(pad=0)
+        self.ax.figure.canvas.draw()
 
     plot_histogram.__doc__ %= HISTOGRAM_MAX_BIN_ARGS
 
@@ -1026,10 +1033,7 @@ class ImageContrastEditor(t.HasTraits):
         if self._vmin == self._vmax:
             return
         self.line.set_data(*self._get_line())
-        if self.ax.figure.canvas.supports_blit:
-            self.hspy_fig._update_animated()
-        else:
-            self.ax.figure.canvas.draw_idle()
+        self.hspy_fig.render_figure()
 
     def apply(self):
         if self.ss_left_value == self.ss_right_value:
@@ -1068,7 +1072,7 @@ class ImageContrastEditor(t.HasTraits):
         self.linscale = self.linscale_original
 
     def _get_current_range(self):
-        if self.span_selector._get_span_width() != 0:
+        if self.span_selector and self.span_selector._get_span_width() != 0:
             # if we have a span selector, use it to set the display
             return self.ss_left_value, self.ss_right_value
         else:
@@ -1081,8 +1085,7 @@ class ImageContrastEditor(t.HasTraits):
                 self.image.vmin = f"{self.vmin_percentile}th"
                 self.image.vmax = f"{self.vmax_percentile}th"
             else:
-                self.image.vmin = self._vmin
-                self.image.vmax = self._vmax
+                self.image.vmin, self.image.vmax = self._get_current_range()
             self.image.connect()
         self.hspy_fig.close()
 
@@ -1243,7 +1246,7 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
     def __init__(self, signal, background_type='Power law', polynomial_order=2,
                  fast=True, plot_remainder=True, zero_fill=False,
                  show_progressbar=None, model=None):
-        super(BackgroundRemoval, self).__init__(signal)
+        super().__init__(signal)
         # setting the polynomial order will change the backgroud_type to
         # polynomial, so we set it before setting the background type
         self.bg_line = None
@@ -1251,6 +1254,12 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
         self.background_estimator = None
         self.fast = fast
         self.plot_remainder = plot_remainder
+        if plot_remainder:
+            # When plotting the remainder on the right hand side axis, we
+            # adjust the layout here to avoid doing it later to avoid
+            # corrupting the background when using blitting
+            figure = signal._plot.signal_plot.figure
+            figure.tight_layout(rect=[0, 0, 0.95, 1])
         if model is None:
             from hyperspy.models.model1d import Model1D
             model = Model1D(signal)
@@ -1268,6 +1277,10 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
         self.set_background_estimator()
 
         self.signal.axes_manager.events.indices_changed.connect(self._fit, [])
+        # This is also disconnected when disabling the span selector but we
+        # disconnect also when closing the figure, because in this case,
+        # `on_disabling_span_selector` will not be called.
+        self.signal._plot.signal_plot.events.closed.connect(self.disconnect, [])
 
     def on_disabling_span_selector(self):
         # Disconnect event
@@ -1278,6 +1291,7 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
         if self.rm_line is not None:
             self.rm_line.close()
             self.rm_line = None
+            self.signal._plot.signal_plot.close_right_axis()
 
     def set_background_estimator(self):
         if self.model is not None:
@@ -1333,8 +1347,9 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
             color='green',
             type='line',
             scaley=False)
-        self.signal._plot.signal_plot.add_line(self.rm_line)
-        self.rm_line.autoscale = ''
+        self.signal._plot.signal_plot.create_right_axis(color='green',
+                                                        adjust_layout=False)
+        self.signal._plot.signal_plot.add_line(self.rm_line, ax='right')
         self.rm_line.plot()
 
     def bg_to_plot(self, axes_manager=None, fill_with=np.nan):
@@ -1356,8 +1371,13 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
                 self.axis.axis[from_index:to_index])
             to_return = bg_array
 
-        if self.signal.metadata.Signal.binned is True:
-            to_return *= self.axis.scale
+        if is_binned(self.signal) is True:
+        # in v2 replace by
+        #if self.axis.is_binned is True:
+            if self.axis.is_uniform:
+                to_return *= self.axis.scale
+            else:
+                to_return *= np.gradient(self.axis.axis)
         return to_return
 
     def rm_to_plot(self, axes_manager=None, fill_with=np.nan):
@@ -1394,12 +1414,13 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
         if self.bg_line is None:
             self.create_background_line()
         else:
-            self.bg_line.update()
+            self.bg_line.update(render_figure=False, update_ylimits=False)
         if self.plot_remainder:
             if self.rm_line is None:
                 self.create_remainder_line()
             else:
-                self.rm_line.update()
+                self.rm_line.update(render_figure=True,
+                                    update_ylimits=True)
 
     def apply(self):
         if not self.is_span_selector_valid:
@@ -1419,8 +1440,9 @@ class BackgroundRemoval(SpanSelectorInSignal1D):
 
     def disconnect(self):
         axes_manager = self.signal.axes_manager
-        if self._fit in axes_manager.events.indices_changed.connected:
-            axes_manager.events.indices_changed.disconnect(self._fit)
+        for f in [self._fit, self.model._on_navigating]:
+            if f in axes_manager.events.indices_changed.connected:
+                axes_manager.events.indices_changed.disconnect(f)
 
 
 def _get_background_estimator(background_type, polynomial_order=1):
@@ -1527,55 +1549,45 @@ class SimpleMessage(t.HasTraits):
         self.text = text
 
 
-@add_gui_method(toolkey="hyperspy.Signal1D.spikes_removal_tool")
-class SpikesRemoval(SpanSelectorInSignal1D):
-    interpolator_kind = t.Enum(
-        'Linear',
-        'Spline',
-        default='Linear',
-        desc="the type of interpolation to use when\n"
-             "replacing the signal where a spike has been replaced")
-    threshold = t.Float(400, desc="the derivative magnitude threshold above\n"
-                        "which to find spikes")
-    click_to_show_instructions = t.Button()
-    show_derivative_histogram = t.Button()
-    spline_order = t.Range(1, 10, 3,
-                           desc="the order of the spline used to\n"
-                           "connect the reconstructed data")
-    interpolator = None
-    default_spike_width = t.Int(5,
-                                desc="the width over which to do the interpolation\n"
-                                "when removing a spike (this can be "
-                                "adjusted for each\nspike by clicking "
-                                     "and dragging on the display during\n"
-                                     "spike replacement)")
-    index = t.Int(0)
-    add_noise = t.Bool(True,
-                       desc="whether to add noise to the interpolated\nportion"
-                       "of the spectrum. The noise properties defined\n"
-                       "in the Signal metadata are used if present,"
-                            "otherwise\nshot noise is used as a default")
+class SpikesRemoval:
 
-    def __init__(self, signal, navigation_mask=None, signal_mask=None):
-        super(SpikesRemoval, self).__init__(signal)
+    def __init__(self, signal, navigation_mask=None, signal_mask=None,
+                 threshold='auto', default_spike_width=5, add_noise=True,
+                 max_num_bins=1000):
+        self.ss_left_value = np.nan
+        self.ss_right_value = np.nan
+        self.default_spike_width = default_spike_width
+        self.add_noise = add_noise
+        self.signal_mask = signal_mask
+        self.navigation_mask = navigation_mask
         self.interpolated_line = None
         self.coordinates = [coordinate for coordinate in
                             signal.axes_manager._am_indices_generator()
                             if (navigation_mask is None or not
                                 navigation_mask[coordinate[::-1]])]
         self.signal = signal
-        self.line = signal._plot.signal_plot.ax_lines[0]
-        self.ax = signal._plot.signal_plot.ax
-        signal._plot.auto_update_plot = False
+        self.axis = self.signal.axes_manager.signal_axes[0]
         if len(self.coordinates) > 1:
             signal.axes_manager.indices = self.coordinates[0]
-        self.index = 0
+        if threshold == 'auto':
+            # Find the first zero of the spikes diagnosis plot
+            hist = signal._get_spikes_diagnosis_histogram_data(
+                    signal_mask=signal_mask,
+                    navigation_mask=navigation_mask,
+                    max_num_bins=max_num_bins)
+            zero_index = np.where(hist.data == 0)[0]
+            if zero_index.shape[0] > 0:
+                index = zero_index[0]
+            else:
+                index = hist.data.shape[0] - 1
+            threshold = np.ceil(hist.axes_manager[0].index2value(index))
+            _logger.info(f'Threshold value: {threshold}')
         self.argmax = None
         self.derivmax = None
         self.kind = "linear"
         self._temp_mask = np.zeros(self.signal().shape, dtype='bool')
-        self.signal_mask = signal_mask
-        self.navigation_mask = navigation_mask
+        self.index = 0
+        self.threshold = threshold
         md = self.signal.metadata
         from hyperspy.signal import BaseSignal
 
@@ -1591,27 +1603,17 @@ class SpikesRemoval(SpanSelectorInSignal1D):
         else:
             self.noise_type = "shot noise"
 
-    def _threshold_changed(self, old, new):
-        self.index = 0
-        self.update_plot()
-
-    def _click_to_show_instructions_fired(self):
-        from pyface.message_dialog import information
-        _ = information(None, SPIKES_REMOVAL_INSTRUCTIONS,
-                        title="Instructions"),
-
-    def _show_derivative_histogram_fired(self):
-        self.signal._spikes_diagnosis(signal_mask=self.signal_mask,
-                                      navigation_mask=self.navigation_mask)
-
     def detect_spike(self):
-        derivative = np.diff(self.signal())
+        axis = self.signal.axes_manager.signal_axes[-1].axis
+        derivative = np.gradient(self.signal(), axis)
         if self.signal_mask is not None:
-            derivative[self.signal_mask[:-1]] = 0
+            derivative[self.signal_mask] = 0
         if self.argmax is not None:
             left, right = self.get_interpolation_range()
-            self._temp_mask[left:right] = True
-            derivative[self._temp_mask[:-1]] = 0
+            # Don't search for spikes in the are where one has
+            # been found next time `find` is called.
+            self._temp_mask[left:right + 1] = True
+            derivative[self._temp_mask] = 0
         if abs(derivative.max()) >= self.threshold:
             self.argmax = derivative.argmax()
             self.derivmax = abs(derivative.max())
@@ -1619,14 +1621,7 @@ class SpikesRemoval(SpanSelectorInSignal1D):
         else:
             return False
 
-    def _reset_line(self):
-        if self.interpolated_line is not None:
-            self.interpolated_line.close()
-            self.interpolated_line = None
-            self.reset_span_selector()
-
     def find(self, back=False):
-        self._reset_line()
         ncoordinates = len(self.coordinates)
         spike = self.detect_spike()
         with self.signal.axes_manager.events.indices_changed.suppress():
@@ -1637,96 +1632,15 @@ class SpikesRemoval(SpanSelectorInSignal1D):
                     self.index += 1
                 else:
                     self.index -= 1
+                self._index_changed(self.index, self.index)
                 spike = self.detect_spike()
 
-        if spike is False:
-            m = SimpleMessage()
-            m.text = 'End of dataset reached'
-            try:
-                m.gui()
-            except (NotImplementedError, ImportError):
-                # This is only available for traitsui, ipywidgets has a
-                # progress bar instead.
-                pass
-            except ValueError as error:
-                _logger.warning(error)
-            self.index = 0
-            self._reset_line()
-            return
-        else:
-            minimum = max(0, self.argmax - 50)
-            maximum = min(len(self.signal()) - 1, self.argmax + 50)
-            thresh_label = DerivativeTextParameters(
-                text=r"$\mathsf{\delta}_\mathsf{max}=$",
-                color="black")
-            self.ax.legend([thresh_label], [repr(int(self.derivmax))],
-                           handler_map={DerivativeTextParameters:
-                                        DerivativeTextHandler()},
-                           loc='best')
-            self.ax.set_xlim(
-                self.signal.axes_manager.signal_axes[0].index2value(
-                    minimum),
-                self.signal.axes_manager.signal_axes[0].index2value(
-                    maximum))
-            self.update_plot()
-            self.create_interpolation_line()
-
-    def update_plot(self):
-        if self.interpolated_line is not None:
-            self.interpolated_line.close()
-            self.interpolated_line = None
-        self.reset_span_selector()
-        self.update_spectrum_line()
-        if len(self.coordinates) > 1:
-            self.signal._plot.pointer._on_navigate(self.signal.axes_manager)
-
-    def update_spectrum_line(self):
-        self.line.auto_update = True
-        self.line.update()
-        self.line.auto_update = False
+        return spike
 
     def _index_changed(self, old, new):
         self.signal.axes_manager.indices = self.coordinates[new]
         self.argmax = None
         self._temp_mask[:] = False
-
-    def on_disabling_span_selector(self):
-        if self.interpolated_line is not None:
-            self.interpolated_line.close()
-            self.interpolated_line = None
-
-    def _spline_order_changed(self, old, new):
-        self.kind = self.spline_order
-        self.span_selector_changed()
-
-    def _add_noise_changed(self, old, new):
-        self.span_selector_changed()
-
-    def _interpolator_kind_changed(self, old, new):
-        if new == 'linear':
-            self.kind = new
-        else:
-            self.kind = self.spline_order
-        self.span_selector_changed()
-
-    def _ss_left_value_changed(self, old, new):
-        if not (np.isnan(self.ss_right_value) or np.isnan(self.ss_left_value)):
-            self.span_selector_changed()
-
-    def _ss_right_value_changed(self, old, new):
-        if not (np.isnan(self.ss_right_value) or np.isnan(self.ss_left_value)):
-            self.span_selector_changed()
-
-    def create_interpolation_line(self):
-        self.interpolated_line = drawing.signal1d.Signal1DLine()
-        self.interpolated_line.data_function = self.get_interpolated_spectrum
-        self.interpolated_line.set_line_properties(
-            color='blue',
-            type='line')
-        self.signal._plot.signal_plot.add_line(self.interpolated_line)
-        self.interpolated_line.auto_update = False
-        self.interpolated_line.autoscale = ''
-        self.interpolated_line.plot()
 
     def get_interpolation_range(self):
         axis = self.signal.axes_manager.signal_axes[0]
@@ -1774,7 +1688,7 @@ class SpikesRemoval(SpanSelectorInSignal1D):
             # Interpolate
             x = np.hstack((axis.axis[ileft:left], axis.axis[right:iright]))
             y = np.hstack((data[ileft:left], data[right:iright]))
-            intp = sp.interpolate.interp1d(x, y, kind=self.kind)
+            intp = interpolate.interp1d(x, y, kind=self.kind)
             data[left:right] = intp(axis.axis[left:right])
 
         # Add noise
@@ -1794,6 +1708,172 @@ class SpikesRemoval(SpanSelectorInSignal1D):
                     np.clip(data[left:right], 0, np.inf))
 
         return data
+
+    def remove_all_spikes(self):
+        spike = self.find()
+        while spike:
+            self.signal()[:] = self.get_interpolated_spectrum()
+            spike = self.find()
+
+
+@add_gui_method(toolkey="hyperspy.Signal1D.spikes_removal_tool")
+class SpikesRemovalInteractive(SpikesRemoval, SpanSelectorInSignal1D):
+    interpolator_kind = t.Enum(
+        'Linear',
+        'Spline',
+        default='Linear',
+        desc="the type of interpolation to use when\n"
+             "replacing the signal where a spike has been replaced")
+    threshold = t.Float(400, desc="the derivative magnitude threshold above\n"
+                        "which to find spikes")
+    click_to_show_instructions = t.Button()
+    show_derivative_histogram = t.Button()
+    spline_order = t.Range(1, 10, 3,
+                           desc="the order of the spline used to\n"
+                           "connect the reconstructed data")
+    interpolator = None
+    default_spike_width = t.Int(5,
+                                desc="the width over which to do the interpolation\n"
+                                "when removing a spike (this can be "
+                                "adjusted for each\nspike by clicking "
+                                     "and dragging on the display during\n"
+                                     "spike replacement)")
+    index = t.Int(0)
+    add_noise = t.Bool(True,
+                       desc="whether to add noise to the interpolated\nportion"
+                       "of the spectrum. The noise properties defined\n"
+                       "in the Signal metadata are used if present,"
+                            "otherwise\nshot noise is used as a default")
+
+    def __init__(self, signal, max_num_bins=1000, **kwargs):
+        SpanSelectorInSignal1D.__init__(self, signal=signal)
+        signal._plot.auto_update_plot = False
+        self.line = signal._plot.signal_plot.ax_lines[0]
+        self.ax = signal._plot.signal_plot.ax
+        SpikesRemoval.__init__(self, signal=signal, **kwargs)
+        self.update_signal_mask()
+        self.max_num_bins = max_num_bins
+
+    def _threshold_changed(self, old, new):
+        self.index = 0
+        self.update_plot()
+
+    def _click_to_show_instructions_fired(self):
+        from pyface.message_dialog import information
+        _ = information(None, SPIKES_REMOVAL_INSTRUCTIONS,
+                        title="Instructions"),
+
+    def _show_derivative_histogram_fired(self):
+        self.signal.spikes_diagnosis(signal_mask=self.signal_mask,
+                                     navigation_mask=self.navigation_mask,
+                                     max_num_bins=self.max_num_bins)
+
+    def _reset_line(self):
+        if self.interpolated_line is not None:
+            self.interpolated_line.close()
+            self.interpolated_line = None
+            self.reset_span_selector()
+
+    def find(self, back=False):
+        self._reset_line()
+        spike = super().find(back=back)
+
+        if spike is False:
+            m = SimpleMessage()
+            m.text = 'End of dataset reached'
+            try:
+                m.gui()
+            except (NotImplementedError, ImportError):
+                # This is only available for traitsui, ipywidgets has a
+                # progress bar instead.
+                pass
+            except ValueError as error:
+                _logger.warning(error)
+            self.index = 0
+            self._reset_line()
+            return
+        else:
+            minimum = max(0, self.argmax - 50)
+            maximum = min(len(self.signal()) - 1, self.argmax + 50)
+            thresh_label = DerivativeTextParameters(
+                text=r"$\mathsf{\delta}_\mathsf{max}=$",
+                color="black")
+            self.ax.legend([thresh_label], [repr(int(self.derivmax))],
+                           handler_map={DerivativeTextParameters:
+                                        DerivativeTextHandler()},
+                           loc='best')
+            self.ax.set_xlim(
+                self.signal.axes_manager.signal_axes[0].index2value(
+                    minimum),
+                self.signal.axes_manager.signal_axes[0].index2value(
+                    maximum))
+            self.signal._plot.pointer._set_indices(
+                self.coordinates[self.index])
+            self.update_plot()
+            self.create_interpolation_line()
+
+    def update_plot(self):
+        if self.interpolated_line is not None:
+            self.interpolated_line.close()
+            self.interpolated_line = None
+        self.reset_span_selector()
+        self.update_spectrum_line()
+        self.update_signal_mask()
+        if len(self.coordinates) > 1:
+            self.signal._plot.pointer._on_navigate(self.signal.axes_manager)
+
+    def update_signal_mask(self):
+        if hasattr(self, 'mask_filling'):
+            self.mask_filling.remove()
+        if self.signal_mask is not None:
+            self.mask_filling = self.ax.fill_between(self.axis.axis,
+                                                     self.signal(), 0,
+                                                     where=self.signal_mask,
+                                                     facecolor='blue',
+                                                     alpha=0.5)
+
+    def update_spectrum_line(self):
+        self.line.auto_update = True
+        self.line.update()
+        self.line.auto_update = False
+
+    def on_disabling_span_selector(self):
+        if self.interpolated_line is not None:
+            self.interpolated_line.close()
+            self.interpolated_line = None
+
+    def _spline_order_changed(self, old, new):
+        self.kind = self.spline_order
+        self.span_selector_changed()
+
+    def _add_noise_changed(self, old, new):
+        self.span_selector_changed()
+
+    def _interpolator_kind_changed(self, old, new):
+        if new == 'linear':
+            self.kind = new
+        else:
+            self.kind = self.spline_order
+        self.span_selector_changed()
+
+    def _ss_left_value_changed(self, old, new):
+        if not (np.isnan(self.ss_right_value) or np.isnan(self.ss_left_value)):
+            self.span_selector_changed()
+
+    def _ss_right_value_changed(self, old, new):
+        if not (np.isnan(self.ss_right_value) or np.isnan(self.ss_left_value)):
+            self.span_selector_changed()
+
+    def create_interpolation_line(self):
+        self.interpolated_line = drawing.signal1d.Signal1DLine()
+        self.interpolated_line.data_function = self.get_interpolated_spectrum
+        self.interpolated_line.set_line_properties(
+            color='blue',
+            type='line')
+        self.signal._plot.signal_plot.add_line(self.interpolated_line)
+        self.interpolated_line.auto_update = False
+        self.interpolated_line.autoscale = ''
+        self.interpolated_line.plot()
 
     def span_selector_changed(self):
         if self.interpolated_line is None:
@@ -1845,7 +1925,7 @@ class PeaksFinder2D(t.HasTraits):
     # For "Laplacian of Gaussian" method
     log_min_sigma = t.Range(0, 2., value=1)
     log_max_sigma = t.Range(0, 100., value=50)
-    log_num_sigma = t.Range(0, 20., value=10)
+    log_num_sigma = t.Range(0, 20, value=10)
     log_threshold = t.Range(0, 0.4, value=0.2)
     log_overlap = t.Range(0, 1., value=0.5)
     log_log_scale = t.Bool(False)
@@ -1943,7 +2023,15 @@ class PeaksFinder2D(t.HasTraits):
         if 'template' in kwargs.keys():
             self.xc_template = kwargs['template']
         if method is not None:
-            self.method = method.capitalize().replace('_', ' ')
+            method_dict = {'local_max':'Local max',
+                           'max':'Max',
+                           'minmax':'Minmax',
+                           'zaefferer':'Zaefferer',
+                           'stat':'Stat',
+                           'laplacian_of_gaussian':'Laplacian of Gaussian',
+                           'difference_of_gaussian':'Difference of Gaussian',
+                           'template_matching':'Template matching'}
+            self.method = method_dict[method]
         self._parse_paramaters_initial_values(**kwargs)
         self._update_peak_finding()
 
@@ -1957,7 +2045,7 @@ class PeaksFinder2D(t.HasTraits):
 
     def _update_peak_finding(self, method=None):
         if method is None:
-            method = self.method.lower().replace(' ', '_')
+            method = self.method
         self._find_peaks_current_index(method=method)
         self._plot_markers()
 
@@ -2003,11 +2091,14 @@ class PeaksFinder2D(t.HasTraits):
         x_axis = self.signal.axes_manager.signal_axes[0]
         y_axis = self.signal.axes_manager.signal_axes[1]
 
-        marker_list = [Point(x=x_axis.index2value(x),
-                             y=y_axis.index2value(y),
-                             color=color,
-                             size=markersize)
-            for x, y in zip(self.peaks.data[:, 1], self.peaks.data[:, 0])]
+        if np.isnan(self.peaks.data).all():
+            marker_list = []
+        else:
+            marker_list = [Point(x=x_axis.index2value(int(round(x))),
+                                 y=y_axis.index2value(int(round(y))),
+                                 color=color,
+                                 size=markersize)
+                for x, y in zip(self.peaks.data[:, 1], self.peaks.data[:, 0])]
 
         return marker_list
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -26,7 +26,7 @@ from hyperspy.decorators import lazifyTestClass
 from hyperspy.exceptions import VisibleDeprecationWarning
 from hyperspy.misc.test_utils import ignore_warning
 from hyperspy.misc.utils import slugify
-
+from hyperspy.axes import GeneratorLen
 
 class TestModelJacobians:
     def setup_method(self, method):
@@ -132,7 +132,7 @@ class TestModelCallMethod:
         m = self.model
         m.convolved = False
         m.remove(1)
-        m.signal.metadata.Signal.binned = True
+        m.signal.axes_manager[-1].is_binned = True
         m.signal.axes_manager[-1].scale = 0.3
         r1 = m()
         np.testing.assert_allclose(m[0].function(0) * 0.3, r1)
@@ -620,6 +620,25 @@ class TestModelPrintCurrentValues:
         self.m.print_current_values(component_list=list(self.m))
 
 
+class TestModelUniformBinned:
+    def setup_method(self, method):
+        self.m = hs.signals.Signal1D(np.arange(10)).create_model()
+        self.o = hs.model.components1D.Offset()
+        self.m.append(self.o)
+
+    @pytest.mark.parametrize("uniform", [True, False])
+    @pytest.mark.parametrize("binned", [True, False])
+    def test_binned_uniform(self, binned, uniform):
+        m = self.m
+        if binned:
+            m.signal.axes_manager[-1].is_binned = True
+        m.signal.axes_manager[-1].scale = 0.3
+        if uniform:
+            m.signal.axes_manager[-1].convert_to_non_uniform_axis()
+        np.testing.assert_allclose(m[0].function(0) * 0.3, m())
+        self.m.print_current_values()
+
+
 class TestStoreCurrentValues:
     def setup_method(self, method):
         self.m = hs.signals.Signal1D(np.arange(10)).create_model()
@@ -683,83 +702,81 @@ class TestAsSignal:
             c.offset.value = 2
         self.m.assign_current_values_to_all()
 
-    @pytest.mark.parallel
-    def test_threaded_identical(self):
-        # all components
-        s = self.m.as_signal(parallel=True)
-        s1 = self.m.as_signal(parallel=False)
-        np.testing.assert_allclose(s1.data, s.data)
-
-        # more complicated
-        self.m[0].active_is_multidimensional = True
-        self.m[0]._active_array[0] = False
-        for component in [0, 1]:
-            s = self.m.as_signal(component_list=[component], parallel=True)
-            s1 = self.m.as_signal(component_list=[component], parallel=False)
-            np.testing.assert_allclose(s1.data, s.data)
-
-    @pytest.mark.parametrize("parallel", [True, False])
-    def test_all_components_simple(self, parallel):
-        s = self.m.as_signal(parallel=parallel)
+    def test_all_components_simple(self):
+        s = self.m.as_signal()
         assert np.all(s.data == 4.0)
 
-    @pytest.mark.parametrize("parallel", [True, False])
-    def test_one_component_simple(self, parallel):
-        s = self.m.as_signal(component_list=[0], parallel=parallel)
+    def test_one_component_simple(self):
+        s = self.m.as_signal(component_list=[0])
         assert np.all(s.data == 2.0)
         assert self.m[1].active
 
-    @pytest.mark.parametrize("parallel", [True, False])
-    def test_all_components_multidim(self, parallel):
+    def test_all_components_multidim(self):
         self.m[0].active_is_multidimensional = True
 
-        s = self.m.as_signal(parallel=parallel)
+        s = self.m.as_signal()
         assert np.all(s.data == 4.0)
 
         self.m[0]._active_array[0] = False
-        s = self.m.as_signal(parallel=parallel)
+        s = self.m.as_signal()
         np.testing.assert_array_equal(
             s.data, np.array([np.ones((2, 5)) * 2, np.ones((2, 5)) * 4])
         )
         assert self.m[0].active_is_multidimensional
 
-    @pytest.mark.parametrize("parallel", [True, False])
-    def test_one_component_multidim(self, parallel):
+    def test_one_component_multidim(self):
         self.m[0].active_is_multidimensional = True
 
-        s = self.m.as_signal(component_list=[0], parallel=parallel)
+        s = self.m.as_signal(component_list=[0])
         assert np.all(s.data == 2.0)
         assert self.m[1].active
         assert not self.m[1].active_is_multidimensional
 
-        s = self.m.as_signal(component_list=[1], parallel=parallel)
+        s = self.m.as_signal(component_list=[1])
         np.testing.assert_equal(s.data, 2.0)
         assert self.m[0].active_is_multidimensional
 
         self.m[0]._active_array[0] = False
-        s = self.m.as_signal(component_list=[1], parallel=parallel)
+        s = self.m.as_signal(component_list=[1])
         assert np.all(s.data == 2.0)
 
-        s = self.m.as_signal(component_list=[0], parallel=parallel)
+        s = self.m.as_signal(component_list=[0])
         np.testing.assert_array_equal(
             s.data, np.array([np.zeros((2, 5)), np.ones((2, 5)) * 2])
         )
 
+    @pytest.mark.parametrize("kw", [{"parallel": True}, {"max_workers": 1}])
+    def test_warnings(self, kw):
+        with pytest.warns(
+            VisibleDeprecationWarning, match=r".* has been deprecated",
+        ):
+            _ = self.m.as_signal(**kw)
 
-def test_as_signal_parallel():
-    np.random.seed(1)
-    s = hs.signals.Signal1D(np.random.random((50, 10)))
+    def test_out_of_range_to_nan(self):
+        index = 2
+        self.m.channel_switches[:index] = False
+        s1 = self.m.as_signal(component_list=[0], out_of_range_to_nan=True)
 
-    m = s.create_model()
-    m.append(hs.model.components1D.PowerLaw())
-    m.set_signal_range(2, 5)
-    # HyperSpy 2.0: remove setting iterpath='serpentine'
-    m.multifit(iterpath="serpentine")
+        s2 = self.m.as_signal(component_list=[0], out_of_range_to_nan=False)
 
-    s1 = m.as_signal(out_of_range_to_nan=True, parallel=True)
-    s2 = m.as_signal(out_of_range_to_nan=True, parallel=True)
+        np.testing.assert_allclose(
+            self.m.channel_switches, [False, False, True, True, True]
+        )
 
-    np.testing.assert_allclose(s1, s2)
+        np.testing.assert_allclose(s2.data, np.ones_like(s2) * 2)
+        np.testing.assert_allclose(s1.isig[index:], s2.isig[index:])
+        np.testing.assert_allclose(
+            s1.isig[:index], np.ones_like(s1.isig[:index].data) * np.nan
+        )
+        np.testing.assert_allclose(
+            s1.isig[index:], np.ones_like(s1.isig[index:].data) * 2
+        )
+
+    def test_out_argument(self):
+        out = self.m.as_signal()
+        out.data.fill(0)
+        s = self.m.as_signal(out=out)
+        assert np.all(s.data == 4.0)
 
 
 @lazifyTestClass
@@ -828,3 +845,66 @@ def test_deprecated_private_functions():
 
     with pytest.warns(VisibleDeprecationWarning, match=r".* has been deprecated"):
         m.set_mpfit_parameters_info()
+
+
+def generate():
+    for i in range(3):
+        yield (i,i)
+
+
+class Test_multifit_iterpath():
+    def setup_method(self, method):
+        data = np.ones((3, 3, 10))
+        s = hs.signals.Signal1D(data)
+        ax = s.axes_manager
+        m = s.create_model()
+        G = hs.model.components1D.Gaussian()
+        m.append(G)
+        self.m = m
+        self.ax = ax
+
+    def test_custom_iterpath(self):
+        indices = np.array([(0,0), (1,1), (2,2)])
+        self.ax.iterpath = indices
+        self.m.multifit(iterpath=indices)
+        set_indices = np.array(np.where(self.m[0].A.map['is_set'])).T
+        np.testing.assert_array_equal(set_indices, indices[:,::-1])
+
+    def test_model_generator(self):
+        gen = generate()
+        self.m.axes_manager.iterpath = gen
+        self.m.multifit()
+
+    def test_model_GeneratorLen(self):
+        gen = GeneratorLen(generate(), 3)
+        self.m.axes_manager.iterpath = gen
+
+
+class TestSignalRange:
+    def setup_method(self, method):
+        s = hs.signals.Signal1D(np.random.rand(10, 10, 20))
+        s.axes_manager[-1].offset = 100
+        m = s.create_model()
+        self.s = s
+        self.m = m
+
+    def test_parse_value(self):
+        m = self.m
+        assert m._parse_signal_range_values(105, 110) == (5, 10)
+        with pytest.raises(ValueError):
+            m._parse_signal_range_values(89, 85)
+
+    def test_parse_value_negative_scale(self):
+        m = self.m
+        s = self.s
+        s.axes_manager[-1].scale = -1
+        assert m._parse_signal_range_values(89, 85) == (11, 15)
+        with pytest.raises(ValueError):
+            m._parse_signal_range_values(85, 89)
+        assert m._parse_signal_range_values(89, 20) == (11, 19)
+
+    def test_parse_roi(self):
+        m = self.m
+        roi = hs.roi.SpanROI(105, 110)
+        assert m._parse_signal_range_values(roi) == (5, 10)
+

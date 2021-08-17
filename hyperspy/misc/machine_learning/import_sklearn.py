@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -29,12 +29,12 @@ try:
         import sklearn
         import sklearn.decomposition
         import sklearn.cluster
-        import sklearn.preprocessing        
+        import sklearn.preprocessing
         import sklearn.metrics
         from sklearn.utils.extmath import randomized_svd
 
         sklearn_installed = True
 
-except ImportError:
+except ImportError:  # pragma: no cover
     randomized_svd = None
     sklearn_installed = False

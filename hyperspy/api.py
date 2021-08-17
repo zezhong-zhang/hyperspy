@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of  HyperSpy.
 #
@@ -25,7 +25,7 @@ __doc__ = hyperspy.api_nogui.__doc__
 try:
     # Register ipywidgets by importing the module
     import hyperspy_gui_ipywidgets
-except ImportError:
+except ImportError:  # pragma: no cover
     from hyperspy.defaults_parser import preferences
     if preferences.GUIs.warn_if_guis_are_missing:
         _logger.warning(
@@ -34,7 +34,7 @@ except ImportError:
 try:
     # Register traitui UI elements by importing the module
     import hyperspy_gui_traitsui
-except ImportError:
+except ImportError:  # pragma: no cover
     from hyperspy.defaults_parser import preferences
     if preferences.GUIs.warn_if_guis_are_missing:
         _logger.warning(

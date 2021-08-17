@@ -45,9 +45,9 @@ if v[0] != 3:
 setup_path = os.path.dirname(__file__)
 
 
-install_req = ['scipy>=1.0.1',
-               'matplotlib>=2.2.3',
-               'numpy>=1.13.0',
+install_req = ['scipy>=1.1',
+               'matplotlib>=3.1.0',
+               'numpy>=1.17.1',
                'traits>=4.5.0',
                'natsort',
                'requests',
@@ -57,17 +57,21 @@ install_req = ['scipy>=1.0.1',
                'h5py>=2.3',
                'python-dateutil>=2.5.0',
                'ipyparallel',
-               'dask[array]>2.0',
+               'dask[array]>2.1.0',
                'scikit-image>=0.15',
                'pint>=0.10',
-               'statsmodels',
                'numexpr',
                'sparse',
                'imageio',
                'pyyaml',
-               'PTable',
-               'tifffile[all]>=2018.10.18',
+               # prettytable and ptable are API compatible
+               # prettytable is maintained and ptable is an unmaintained fork
+               'prettytable',
+               'tifffile>=2018.10.18',
                'numba',
+                # included in stdlib since v3.8, but this required version requires Python 3.10
+                # We can remove this requirement when the minimum supported version becomes Python 3.10
+               'importlib_metadata>=3.6',
                ]
 
 extras_require = {
@@ -75,14 +79,15 @@ extras_require = {
     "gui-jupyter": ["hyperspy_gui_ipywidgets>=1.1.0"],
     "gui-traitsui": ["hyperspy_gui_traitsui>=1.1.0"],
     "mrcz": ["blosc>=1.5", 'mrcz>=0.3.6'],
-    "speed": ["cython"],
-    "usid": ["pyUSID>=0.0.7"],
+    "speed": ["cython", "imagecodecs"],
+    "usid": ["pyUSID>=0.0.7", "sidpy"],
+    "scalebar": ["matplotlib-scalebar"],
     # bug in pip: matplotib is ignored here because it is already present in
     # install_requires.
-    "tests": ["pytest>=3.6", "pytest-mpl", "matplotlib>=3.1"],
+    "tests": ["pytest>=3.6", "pytest-mpl", "pytest-xdist", "pytest-rerunfailures", "pytest-instafail", "matplotlib>=3.1"],
     "coverage":["pytest-cov", "codecov"],
     # required to build the docs
-    "build-doc": ["sphinx>=1.7", "sphinx_rtd_theme"],
+    "build-doc": ["sphinx>=1.7", "sphinx_rtd_theme", "sphinx-toggleprompt", "sphinxcontrib-mermaid", "sphinxcontrib-towncrier"],
 }
 
 # Don't include "tests" and "docs" requirements since "all" is designed to be
@@ -139,7 +144,7 @@ def count_c_extensions(extensions):
 def cythonize_extensions(extensions):
     try:
         from Cython.Build import cythonize
-        return cythonize(extensions)
+        return cythonize(extensions, compiler_directives={'language_level' : "3"})
     except ImportError:
         warnings.warn("""WARNING: cython required to generate fast c code is not found on this system.
 Only slow pure python alternative functions will be available.
@@ -278,7 +283,7 @@ with update_version_when_dev() as version:
                   'hyperspy.tests.learn',
                   'hyperspy.tests.model',
                   'hyperspy.tests.samfire',
-                  'hyperspy.tests.signal',
+                  'hyperspy.tests.signals',
                   'hyperspy.tests.utils',
                   'hyperspy.tests.misc',
                   'hyperspy.models',
@@ -312,13 +317,9 @@ with update_version_when_dev() as version:
                 'tests/drawing/plot_model1d/*.png',
                 'tests/drawing/plot_model/*.png',
                 'tests/drawing/plot_roi/*.png',
-                'misc/eds/example_signals/*.hdf5',
+                'misc/eds/example_signals/*.hspy',
                 'misc/holography/example_signals/*.hdf5',
                 'tests/drawing/plot_mva/*.png',
-                'tests/drawing/plot_signal/*.png',
-                'tests/drawing/plot_signal1d/*.png',
-                'tests/drawing/plot_signal2d/*.png',
-                'tests/drawing/plot_markers/*.png',
                 'tests/drawing/plot_widgets/*.png',
                 'tests/drawing/plot_signal_tools/*.png',
                 'tests/io/blockfile_data/*.blo',
@@ -333,13 +334,15 @@ with update_version_when_dev() as version:
                 'tests/io/dm3_locale/*.dm3',
                 'tests/io/FEI_new/*.emi',
                 'tests/io/FEI_new/*.ser',
-                'tests/io/FEI_new/*.npy',
                 'tests/io/FEI_old/*.emi',
                 'tests/io/FEI_old/*.ser',
                 'tests/io/FEI_old/*.npy',
+                'tests/io/FEI_old/*.tar.gz',
                 'tests/io/msa_files/*.msa',
                 'tests/io/hdf5_files/*.hdf5',
                 'tests/io/hdf5_files/*.hspy',
+                'tests/io/JEOL_files/*',
+                'tests/io/JEOL_files/Sample/00_View000/*',
                 'tests/io/tiff_files/*.tif',
                 'tests/io/tiff_files/*.dm3',
                 'tests/io/npy_files/*.npy',
@@ -359,8 +362,8 @@ with update_version_when_dev() as version:
                 'tests/io/phenom_data/*.elid',
                 'tests/io/sur_data/*.pro',
                 'tests/io/sur_data/*.sur',
-                'tests/signal/data/test_find_peaks1D_ohaver.hdf5',
-                'tests/signal/data/*.hspy',
+                'tests/signals/data/test_find_peaks1D_ohaver.hdf5',
+                'tests/signals/data/*.hspy',
                 'hyperspy_extension.yaml',
             ],
         },
@@ -380,6 +383,7 @@ with update_version_when_dev() as version:
             "Programming Language :: Python :: 3.6",
             "Programming Language :: Python :: 3.7",
             "Programming Language :: Python :: 3.8",
+            "Programming Language :: Python :: 3.9",
             "Development Status :: 4 - Beta",
             "Environment :: Console",
             "Intended Audience :: Science/Research",

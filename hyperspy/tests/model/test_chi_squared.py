@@ -1,4 +1,4 @@
-# Copyright 2007-2020 The HyperSpy developers
+# Copyright 2007-2021 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -95,7 +95,7 @@ class TestChiSquared:
         m.append(g)
         m.set_signal_range(1, 7)
         m.fit()
-        np.testing.assert_allclose(m.red_chisq(), 2.87544335)
+        np.testing.assert_allclose(m.red_chisq(), 2.20961562)
 
     def test_chisq_with_inactive_components(self):
         m = self.model
