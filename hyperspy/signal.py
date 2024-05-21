@@ -2706,7 +2706,13 @@ class BaseSignal(
             or hasattr(value, "__array_namespace__")
         ):
             value = np.asanyarray(value)
-        self._data = np.atleast_1d(value)
+        # self._data = np.atleast_1d(value)
+        # if value is a dask array or a numpy array
+        if isinstance(value, da.Array) or isinstance(value, np.ndarray):
+            self._data = np.atleast_1d(value)
+        # if the value is a sparse array
+        else:
+            self._data = value
 
     @property
     def metadata(self):
