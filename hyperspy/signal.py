@@ -30,6 +30,7 @@ from pathlib import Path
 
 import dask.array as da
 import numpy as np
+import sparse
 import traits.api as t
 from dask.diagnostics import ProgressBar
 from matplotlib import pyplot as plt
@@ -40,6 +41,7 @@ from scipy import integrate
 from scipy import signal as sp_signal
 from scipy.interpolate import make_interp_spline
 from tlz import concat
+
 
 from hyperspy.api import _ureg
 from hyperspy.axes import AxesManager, create_axis
@@ -2711,7 +2713,7 @@ class BaseSignal(
         if isinstance(value, da.Array) or isinstance(value, np.ndarray):
             self._data = np.atleast_1d(value)
         # if the value is a sparse array
-        else:
+        if isinstance(value, sparse.COO):
             self._data = value
 
     @property
@@ -4247,10 +4249,15 @@ class BaseSignal(
                 "the integral of the signal. For this functionality, "
                 "use integrate1D instead."
             )
-
-        return self._apply_function_on_data_and_remove_axis(
-            np.sum, axis, out=out, rechunk=rechunk
-        )
+        if isinstance(self.data, sparse.COO):
+            index_in_array = [ax.index_in_array for ax in axes]
+            s = self._deepcopy_with_new_data(self.data.sum(axis=index_in_array).todense())
+            s._remove_axis([ax.index_in_axes_manager for ax in axes])
+            return s
+        else:
+            return self._apply_function_on_data_and_remove_axis(
+                np.sum, axis, out=out, rechunk=rechunk
+            )
 
     sum.__doc__ %= (MANY_AXIS_PARAMETER, OUT_ARG, RECHUNK_ARG)
 
