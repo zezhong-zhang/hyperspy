@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -44,8 +44,7 @@ def rpca_godec(
 
     Decomposes a matrix Y = X + E, where X is low-rank and E
     is a sparse error matrix. This algorithm is based on the
-    Matlab code from [Zhou2011]_. See code here:
-    https://sites.google.com/site/godecomposition/matrix/artifact-1
+    Matlab code from [Zhou2011]_.
 
     Read more in the :ref:`User Guide <mva.rpca>`.
 

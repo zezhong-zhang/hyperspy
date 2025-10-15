@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -16,7 +16,6 @@
 # You should have received a copy of the GNU General Public License
 # along with HyperSpy. If not, see <https://www.gnu.org/licenses/#GPL>.
 
-import logging
 from unittest import mock
 
 import dask
@@ -25,6 +24,7 @@ import pytest
 from packaging.version import Version
 
 from hyperspy.decorators import lazifyTestClass
+from hyperspy.exceptions import VisibleDeprecationWarning
 from hyperspy.signal import BaseSignal
 from hyperspy.signals import Signal1D, Signal2D
 
@@ -442,30 +442,25 @@ class Test2D:
             rng1 = np.random.default_rng(123)
             rng2 = np.random.default_rng(123)
 
-        s.add_poissonian_noise(keep_dtype=False, random_state=rng1)
+        original_data = s.data
+        s.add_poissonian_noise(random_state=rng1)
+        assert s.data is original_data
 
         if s._lazy:
             s.compute()
 
         np.testing.assert_array_almost_equal(s.data, rng2.poisson(lam=data, **kwargs))
         s.change_dtype("float64")
-
-        s.add_poissonian_noise(keep_dtype=True, random_state=rng1)
+        original_data = s.data
+        s.add_poissonian_noise(random_state=rng1)
         if s._lazy:
             s.compute()
+        assert s.data is original_data
 
         assert s.data.dtype == np.dtype("float64")
 
     def test_add_poisson_noise_warning(self, caplog):
         s = self.signal
-        s.change_dtype("float64")
 
-        with caplog.at_level(logging.WARNING):
-            s.add_poissonian_noise(keep_dtype=True)
-
-        assert "Changing data type from" in caplog.text
-
-        with caplog.at_level(logging.WARNING):
+        with pytest.warns(VisibleDeprecationWarning):
             s.add_poissonian_noise(keep_dtype=False)
-
-        assert "The data type changed from" in caplog.text

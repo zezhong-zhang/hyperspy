@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -20,6 +20,7 @@ import copy
 import inspect
 import logging
 import numbers
+import os
 import warnings
 from collections.abc import MutableMapping
 from contextlib import contextmanager
@@ -28,11 +29,11 @@ from functools import partial
 from itertools import product
 from pathlib import Path
 
+import dask
 import dask.array as da
 import numpy as np
 import sparse
 import traits.api as t
-from dask.diagnostics import ProgressBar
 from matplotlib import pyplot as plt
 from pint import UndefinedUnitError
 from rsciio.utils import rgb_tools
@@ -55,6 +56,8 @@ from hyperspy.docstrings.signal import (
     CLUSTER_SIGNALS_ARG,
     HISTOGRAM_BIN_ARGS,
     HISTOGRAM_MAX_BIN_ARGS,
+    HISTOGRAM_RANGE_ARGS,
+    IN_PLACE,
     LAZY_OUTPUT_ARG,
     MANY_AXIS_PARAMETER,
     NAN_FUNC,
@@ -75,18 +78,21 @@ from hyperspy.exceptions import (
     DataDimensionError,
     LazyCupyConversion,
     SignalDimensionError,
+    VisibleDeprecationWarning,
 )
+from hyperspy.external.scipy.ndfilters import _get_footprint
 from hyperspy.interactive import interactive
-from hyperspy.io import assign_signal_subclass
+from hyperspy.io import _get_format_list_for_docstring, assign_signal_subclass
 from hyperspy.io import save as io_save
 from hyperspy.learn.mva import MVA, LearningResults
 from hyperspy.misc.array_tools import rebin as array_rebin
-from hyperspy.misc.hist_tools import histogram
+from hyperspy.misc.hist_tools import _set_histogram_metadata, histogram
 from hyperspy.misc.math_tools import check_random_state, hann_window_nth_order, outer_nd
 from hyperspy.misc.signal_tools import are_signals_aligned, broadcast_signals
 from hyperspy.misc.slicing import FancySlicing, SpecialSlicers
 from hyperspy.misc.utils import (
     DictionaryTreeBrowser,
+    _compute,
     _get_block_pattern,
     add_scalar_axis,
     guess_output_signal_size,
@@ -345,6 +351,18 @@ class ModelManager(object):
         """
         name = self._check_name(name, True)
         d = self._models.get_item(name + "._dict").as_dictionary()
+        for c in d["components"]:
+            # Restoring of polynomials saved with Hyperspy <v2.1.1 and >= 1.5
+            # the order initialisation argument was missing from the whitelist
+            # We patch the dictionary to be able to load these files
+            if (
+                c["_id_name"] == "Polynomial"
+                # make sure that this is not an old polynomial
+                and c["parameters"][0]["_id_name"] != "coefficients"
+                and "order" not in c.keys()
+            ):
+                c["_whitelist"]["order"] = "init"
+                c["order"] = len(c["parameters"]) - 1
         return self._signal.create_model(dictionary=copy.deepcopy(d))
 
     def __repr__(self):
@@ -2063,8 +2081,7 @@ class MVATools(object):
         """
         if self.axes_manager.signal_dimension > 2:
             raise NotImplementedError(
-                "This method cannot plot factors of "
-                "signals of dimension higher than 2."
+                "This method cannot plot factors of signals of dimension higher than 2."
             )
         cs = self._get_cluster_signals_factors(signal=signal)
         if same_window is None:
@@ -2645,7 +2662,11 @@ class BaseSignal(
                 self.learning_results = old_learning_results
 
     def as_lazy(
-        self, copy_variance=True, copy_navigator=True, copy_learning_results=True
+        self,
+        chunks=None,
+        copy_variance=True,
+        copy_navigator=True,
+        copy_learning_results=True,
     ):
         """
         Create a copy of the given Signal as a
@@ -2653,6 +2674,13 @@ class BaseSignal(
 
         Parameters
         ----------
+        chunks : str or tuple
+            Define chunking of the dask array.
+            If ``"auto"``, automatic chunking will be used and the signal
+            dimension will not be split. If ``dask_auto"``, dask's
+            automatic chunking will be used. If tuple, it defines the chunks,
+            see dask documentation for more information on defining chunks.
+            If ``str`` and the array is already a dask array, don't change the chunking.
         copy_variance : bool
             Whether or not to copy the variance from the original Signal to
             the new lazy version. Default is True.
@@ -2675,7 +2703,15 @@ class BaseSignal(
             copy_learning_results=copy_learning_results,
         )
         res._lazy = True
-        res._assign_subclass()
+        if chunks is None:
+            # Set default values
+            chunks = False if isinstance(res.data, da.Array) else "auto"
+        elif isinstance(chunks, str) and isinstance(res.data, da.Array):
+            chunks = False
+            _logger.warning(
+                "Ignoring `chunks` argument because data is already a dask array."
+            )
+        res._assign_subclass(chunks=chunks)
         return res
 
     def _summary(self):
@@ -2853,13 +2889,24 @@ class BaseSignal(
 
     # TODO: try to find a way to use dask ufuncs when called with lazy data (e.g.
     # np.log(s) -> da.log(s.data) wrapped.
-    def __array__(self, dtype=None):
+    def __array__(self, dtype=None, copy=None):
+        # The copy parameter was added in numpy 2.0
+        if dtype is not None and dtype != self.data.dtype:
+            if copy is not None and not copy:
+                raise ValueError(
+                    f"Converting array from {self.data.dtype} to "
+                    f"{dtype} requires a copy."
+                )
         if dtype:
-            return self.data.astype(dtype)
+            array = self.data.astype(dtype)
         else:
-            return self.data
+            array = self.data
+        if copy:
+            array = np.copy(array)
 
-    def __array_wrap__(self, array, context=None):
+        return array
+
+    def __array_wrap__(self, array, context=None, return_scalar=False):
         signal = self._deepcopy_with_new_data(array)
         if context is not None:
             # ufunc, argument of the ufunc, domain of the ufunc
@@ -3023,6 +3070,21 @@ class BaseSignal(
                 navigator = None
             else:
                 navigator = "slider"
+
+        from hyperspy.defaults_parser import preferences
+
+        if (
+            "fig" not in kwargs.keys()
+            and preferences.Plot.use_subfigure
+            and axes_manager.navigation_dimension > 0
+            and axes_manager.signal_dimension in [1, 2]
+        ):
+            # Create default subfigure
+            fig = plt.figure(figsize=(15, 7), layout="constrained")
+            subfigs = fig.subfigures(1, 2)
+            kwargs["fig"] = subfigs[1]
+            kwargs["navigator_kwds"] = dict(fig=subfigs[0])
+
         if axes_manager.signal_dimension == 0:
             if axes_manager.navigation_dimension == 0:
                 # 0d signal without navigation axis: don't make a figure
@@ -3234,15 +3296,13 @@ class BaseSignal(
     ):
         """Saves the signal in the specified format.
 
-        The function gets the format from the specified extension (see
-        :ref:`supported-formats` in the User Guide for more information):
+        The function gets the format from the specified extension
+        (:ref:`supported-formats`):
+        %s
 
-        * ``'hspy'`` for HyperSpy's HDF5 specification
-        * ``'rpl'`` for Ripple (useful to export to Digital Micrograph)
-        * ``'msa'`` for EMSA/MSA single spectrum saving.
-        * ``'unf'`` for SEMPER unf binary format.
-        * ``'blo'`` for Blockfile diffraction stack saving.
-        * Many image formats such as ``'png'``, ``'tiff'``, ``'jpeg'``...
+        File format support is provided by RosettaSciIO. For detailed information
+        about supported formats, format-specific parameters, and examples, see the
+        `RosettaSciIO documentation <https://hyperspy.org/rosettasciio/>`_.
 
         If no extension is provided the default file format as defined
         in the `preferences` is used.
@@ -3255,28 +3315,41 @@ class BaseSignal(
 
         Parameters
         ----------
-        filename : str or None
-            If None (default) and `tmp_parameters.filename` and
-            `tmp_parameters.folder` are defined, the
-            filename and path will be taken from there. A valid
-            extension can be provided e.g. ``'my_file.rpl'``
-            (see `extension` parameter).
+        filename : str, :py:obj:`~pathlib.Path`, or None
+            The output filename or directory path. Can be:
+
+            * **Full path with extension**: ``'/path/to/my_file.hspy'``
+            * **Directory path only**: ``'/path/to/output_folder/'`` - When a
+              directory is provided, the filename is constructed from
+              `tmp_parameters.filename` and the extension is determined from
+              the `file_format` or `tmp_parameters.extension` parameters.
+            * **None**: Uses `tmp_parameters.folder` and `tmp_parameters.filename`
+              if available.
+
+            **About tmp_parameters**: These are automatically created when
+            loading files and store the original filename, folder, and extension.
+            This enables convenient workflows like batch processing where you
+            can load files, process them, and save to new locations without
+            manually specifying filenames.
         overwrite : None or bool
             If None, if the file exists it will query the user. If
             True(False) it does(not) overwrite the file if it exists.
         extension : None or str
+            .. deprecated:: 2.4
+                The `extension` parameter is deprecated in version 2.4 and will
+                be removed in version 3.0. Use ``file_format`` instead.
+
             The extension of the file that defines the file format.
-            Allowable string values are: {``'hspy'``, ``'hdf5'``, ``'rpl'``,
-            ``'msa'``, ``'unf'``, ``'blo'``, ``'emd'``, and common image
-            extensions e.g. ``'tiff'``, ``'png'``, etc.}
+            Allowable string values are: %s
             ``'hspy'`` and ``'hdf5'`` are equivalent. Use ``'hdf5'`` if
             compatibility with HyperSpy versions older than 1.2 is required.
             If ``None``, the extension is determined from the following list in
             this order:
 
-            i) the filename
-            ii)  `Signal.tmp_parameters.extension`
-            iii) ``'hspy'`` (the default extension)
+            i) the ``filename`` (if a full filename with extension is provided)
+            ii) the ``file_format`` parameter (mapped to corresponding extension)
+            iii) ``Signal.tmp_parameters.extension``
+            iv) ``'.hspy'`` (the default extension)
         chunks : tuple or True or None (default)
             HyperSpy, Nexus and EMD NCEM format only. Define chunks used when
             saving. The chunk shape should follow the order of the array
@@ -3301,21 +3374,91 @@ class BaseSignal(
         close_file : bool, optional
             Only for hdf5-based files and some zarr store. Close the file after
             writing. Default is True.
-        file_format: string
-            The file format of choice to save the file. If not given, it is inferred
-            from the file extension.
+        file_format : None or str, optional
+            The name or the extension of the file format of choice to save the file.
+            If not given, it is inferred from the file extension.
+            Supported formats:
+        %s
+
+        Examples
+        --------
+        Save with a complete filename:
+
+        >>> s = hs.signals.Signal1D(np.arange(10))
+        >>> s.save("my_data.hspy")
+
+        Re-save a loaded signal in a different location (uses tmp_parameters):
+
+        >>> s = hs.load("original_data.hspy")  # tmp_parameters are auto-populated
+        >>> s.save("/new/output/folder/")      # Saves to /new/output/folder/original_data.hspy
+
+        Re-save a loaded signal in a different format:
+
+        >>> s = hs.load("data.hspy")           # Original format
+        >>> s.save("/output/", file_format="msa")  # Convert to MSA format
+        >>> s.save("/output/", file_format="rpl")  # Convert to Ripple format
+
+        Process multiple files and save in different format:
+
+        >>> import hyperspy.api as hs
+        >>> from pathlib import Path
+        >>>
+        >>> input_folder = Path("input_data/")
+        >>> output_folder = Path("processed_data/")
+        >>>
+        >>> for file_path in input_folder.glob("*.hspy"):
+        ...     s = hs.load(file_path)
+        ...     # Process the signal...
+        ...     s = s.remove_background()
+        ...     # Save in new location with different format
+        ...     s.save(output_folder, file_format="msa")
 
         """
+        # Check for conflicting parameters
+        if extension is not None and file_format is not None:
+            raise ValueError(
+                "Cannot specify both 'extension' and 'file_format' parameters. "
+                "Please use only 'file_format' as 'extension' is deprecated."
+            )
+
+        # Deprecation warning for extension parameter
+        if extension is not None:
+            warnings.warn(
+                "The 'extension' parameter is deprecated in HyperSpy 2.4 and will be removed in HyperSpy 3.0. "
+                "Please use 'file_format' instead.",
+                FutureWarning,
+                stacklevel=2,
+            )
+
         if filename is None:
             if self.tmp_parameters.has_item(
                 "filename"
             ) and self.tmp_parameters.has_item("folder"):
+                # Determine the extension to use
+                if self.tmp_parameters.has_item("extension"):
+                    file_ext = self.tmp_parameters.extension
+                elif file_format is not None:
+                    # Get the default extension for the file format from rsciio
+                    try:
+                        from hyperspy.io import _format_name_to_reader
+
+                        writer = _format_name_to_reader(file_format)
+                        file_ext = (
+                            "." + writer["file_extensions"][writer["default_extension"]]
+                        )
+                    except (ValueError, KeyError):
+                        # If format not found in rsciio, use the file_format as extension
+                        file_ext = "." + file_format
+                else:
+                    file_ext = ".hspy"  # Default extension
+
                 filename = Path(
-                    self.tmp_parameters.folder, self.tmp_parameters.filename
+                    self.tmp_parameters.folder,
+                    self.tmp_parameters.filename + file_ext,
                 )
-                extension = (
-                    self.tmp_parameters.extension if not extension else extension
-                )
+                # Don't override extension if it was explicitly provided
+                if extension is None and self.tmp_parameters.has_item("extension"):
+                    extension = self.tmp_parameters.extension
             elif self.metadata.has_item("General.original_filename"):
                 filename = self.metadata.General.original_filename
             else:
@@ -3323,9 +3466,60 @@ class BaseSignal(
 
         if not isinstance(filename, MutableMapping):
             filename = Path(filename)
-            if extension is not None:
-                filename = filename.with_suffix(f".{extension}")
+
+            # zspy can also be directory, make sure this is treated as a base directory
+            if (
+                filename.is_dir()
+                and not filename.suffix == ".zspy"
+                and self.tmp_parameters.has_item("filename")
+            ):
+                # Filename is a directory path, construct full filename
+
+                # Determine extension from file_format, extension parameter, or tmp_parameters.extension
+                if extension is not None:
+                    file_extension = extension.lstrip(".")
+                elif file_format is not None:
+                    # Get the default extension for the file format from rsciio
+                    try:
+                        from hyperspy.io import _format_name_to_reader
+
+                        writer = _format_name_to_reader(file_format)
+                        file_extension = writer["file_extensions"][
+                            writer["default_extension"]
+                        ]
+                    except (ValueError, KeyError):
+                        # If format not found in rsciio, use the file_format as extension
+                        file_extension = file_format
+                elif self.tmp_parameters.has_item("extension"):
+                    file_extension = self.tmp_parameters.extension.lstrip(".")
+                else:
+                    file_extension = "hspy"  # Default extension
+
+                # Construct full filename
+                base_filename = self.tmp_parameters.filename
+                if not base_filename.endswith(f".{file_extension}"):
+                    full_filename = f"{base_filename}.{file_extension}"
+                else:
+                    full_filename = base_filename
+
+                filename = filename / full_filename
+            elif extension is not None:
+                # If extension parameter is provided, ensure filename has that extension
+                # Remove any existing extension and add the specified one
+                base_name = filename.stem
+                if filename.parent != Path("."):
+                    filename = filename.parent / f"{base_name}.{extension.lstrip('.')}"
+                else:
+                    filename = Path(f"{base_name}.{extension.lstrip('.')}")
+
         io_save(filename, self, overwrite=overwrite, file_format=file_format, **kwds)
+
+    # Format save method docstring with dynamic format list
+    save.__doc__ = save.__doc__ % (
+        _get_format_list_for_docstring(write_mode=True, style="bullet", indentation=8),
+        _get_format_list_for_docstring(write_mode=True, style="inline", indentation=8),
+        _get_format_list_for_docstring(write_mode=True, style="bullet", indentation=12),
+    )
 
     def _replot(self):
         if self._plot is not None:
@@ -3381,7 +3575,7 @@ class BaseSignal(
         i1, i2 = axis._get_index(start), axis._get_index(end)
         # To prevent an axis error, which may confuse users
         if i1 is not None and i2 is not None and not i1 != i2:
-            raise ValueError("The `start` and `end` values need to be " "different.")
+            raise ValueError("The `start` and `end` values need to be different.")
 
         # We take a copy to guarantee the continuity of the data
         self.data = self.data[
@@ -3396,17 +3590,21 @@ class BaseSignal(
             self.axes_manager.convert_units(axis)
 
     def interpolate_on_axis(self, new_axis, axis=0, inplace=False, degree=1):
-        """Replaces the given ``axis`` with the provided ``new_axis``
+        """
+        Replaces the given ``axis`` with the provided ``new_axis``
         and interpolates data accordingly using
         :func:`scipy.interpolate.make_interp_spline`.
 
         Parameters
         ----------
         new_axis : :class:`hyperspy.axes.UniformDataAxis`,
-        :class:`hyperspy.axes.DataAxis` or :class:`hyperspy.axes.FunctionalDataAxis`
+        :class:`hyperspy.axes.DataAxis`, :class:`hyperspy.axes.FunctionalDataAxis`
+        or str
             Axis which replaces the one specified by the ``axis`` argument.
             If this new axis exceeds the range of the old axis,
             a warning is raised that the data will be extrapolated.
+            If ``"uniform"``, convert the axis specified by the ``axis``
+            parameter to a uniform axis with the same number of data points.
         axis : int or str, default 0
             Specifies the axis which will be replaced using the index of the
             axis in the `axes_manager`. The axis can be specified using the index of the
@@ -3423,28 +3621,63 @@ class BaseSignal(
         :class:`~.api.signals.BaseSignal` (or subclass)
             A copy of the object with the axis exchanged and the data interpolated.
             This only occurs when inplace is set to ``False``, otherwise nothing is returned.
+
+        Examples
+        --------
+        >>> s = hs.data.luminescence_signal(uniform=False)
+        >>> s2 = s.interpolate_on_axis("uniform", -1, inplace=False)
+        >>> hs.plot.plot_spectra(
+        ...     [s, s2],
+        ...     legend=["FunctionalAxis", "Interpolated"],
+        ...     drawstyle='steps-mid',
+        ... )
+        <Axes: xlabel='Energy (eV)', ylabel='Intensity'>
+
+        Specifying a uniform axis:
+
+        >>> s = hs.data.luminescence_signal(uniform=False)
+        >>> new_axis = s.axes_manager[-1].copy()
+        >>> new_axis.convert_to_uniform_axis()
+        >>> s3 = s.interpolate_on_axis(new_axis, -1, inplace=False)
+        >>> hs.plot.plot_spectra(
+        ...     [s, s3],
+        ...     legend=["FunctionalAxis", "Interpolated"],
+        ...     drawstyle='steps-mid',
+        ... )
+        <Axes: xlabel='Energy (eV)', ylabel='Intensity'>
         """
         old_axis = self.axes_manager[axis]
-        if old_axis.navigate != new_axis.navigate:
-            raise ValueError(
-                "The navigate attribute of new_axis differs from the to be replaced axis."
-            )
         axis_idx = old_axis.index_in_array
-        if (
-            old_axis.low_value > new_axis.low_value
-            or old_axis.high_value < new_axis.high_value
-        ):
-            _logger.warning(
-                "The specified new axis exceeds the range of the to be replaced old axis. "
-                "The data will be extrapolated if not specified otherwise via fill_value/bounds_error"
-            )
-
         interpolator = make_interp_spline(
             old_axis.axis,
             self.data,
             axis=axis_idx,
             k=degree,
         )
+
+        if new_axis == "uniform":
+            if old_axis.is_uniform:
+                raise ValueError(f"The axis {old_axis.name} is already uniform.")
+            if inplace:
+                old_axis.convert_to_uniform_axis(log_scale_error=False)
+                new_axis = old_axis
+            else:
+                new_axis = old_axis.copy()
+                new_axis.convert_to_uniform_axis(log_scale_error=False)
+        else:
+            if old_axis.navigate != new_axis.navigate:
+                raise ValueError(
+                    "The navigate attribute of new_axis differs from the to be replaced axis."
+                )
+            if (
+                old_axis.low_value > new_axis.low_value
+                or old_axis.high_value < new_axis.high_value
+            ):
+                _logger.warning(
+                    "The specified new axis exceeds the range of the to be replaced old axis. "
+                    "The data will be extrapolated if not specified otherwise via fill_value/bounds_error"
+                )
+
         new_data = interpolator(new_axis.axis)
 
         if inplace:
@@ -3453,7 +3686,10 @@ class BaseSignal(
         else:
             s = self._deepcopy_with_new_data(new_data)
 
-        s.axes_manager.set_axis(new_axis, axis_idx)
+        if new_axis is not old_axis:
+            # user specifies a new_axis != "uniform"
+            s.axes_manager.set_axis(new_axis, axis_idx)
+
         if not inplace:
             return s
 
@@ -3566,15 +3802,19 @@ class BaseSignal(
             raise ValueError("One of new_shape, or scale must be specified")
         elif new_shape is not None and scale is not None:
             raise ValueError(
-                "Only one out of new_shape or scale should be specified. " "Not both."
+                "Only one out of new_shape or scale should be specified. Not both."
             )
         elif new_shape:
             if len(new_shape) != len(self.data.shape):
                 raise ValueError("Wrong new_shape size")
-            for axis in self.axes_manager._axes:
-                if axis.is_uniform is False:
+            for i, axis in enumerate(self.axes_manager._axes):
+                # If the shape doesn't change, there is nothing to do
+                # and we don't need to raise an error
+                if axis.is_uniform is False and new_shape[i] != self.data.shape[i]:
                     raise NotImplementedError(
-                        "Rebinning of non-uniform axes is not yet implemented."
+                        "Rebinning of non-uniform axes is not yet implemented. "
+                        "An alternative is to interpolate the data on an uniform axis "
+                        "using `interpolate_on_axis` before rebinning."
                     )
             new_shape_in_array = np.array(
                 [
@@ -3586,8 +3826,8 @@ class BaseSignal(
         else:
             if len(scale) != len(self.data.shape):
                 raise ValueError("Wrong scale size")
-            for axis in self.axes_manager._axes:
-                if axis.is_uniform is False:
+            for i, axis in enumerate(self.axes_manager._axes):
+                if axis.is_uniform is False and scale[i] != 1:
                     raise NotImplementedError(
                         "Rebinning of non-uniform axes is not yet implemented."
                     )
@@ -3680,8 +3920,10 @@ class BaseSignal(
         s.get_dimensions_from_data()
         for axis, axis_src in zip(s.axes_manager._axes, self.axes_manager._axes):
             factor = factors[axis.index_in_array]
-            axis.scale = axis_src.scale * factor
-            axis.offset = axis_src.offset + (factor - 1) * axis_src.scale / 2
+            if factor != 1:
+                # Change scale, offset only when necessary
+                axis.scale = axis_src.scale * factor
+                axis.offset = axis_src.offset + (factor - 1) * axis_src.scale / 2
         if s.metadata.has_item("Signal.Noise_properties.variance"):
             if isinstance(s.metadata.Signal.Noise_properties.variance, BaseSignal):
                 var = s.metadata.Signal.Noise_properties.variance
@@ -4626,14 +4868,23 @@ class BaseSignal(
         """
         # rechunk was a valid keyword up to HyperSpy 1.6
         if "rechunk" in kwargs:
+            # We miss the deprecation cycle for 2.0
+            warnings.warn(
+                "The `rechunk` parameter is not used since HyperSpy 1.7 and"
+                "will be removed in HyperSpy 3.0.",
+                VisibleDeprecationWarning,
+            )
             del kwargs["rechunk"]
         n = order
         der_data = self.data
+        axis = self.axes_manager[axis]
+        if isinstance(axis, tuple):
+            axis = axis[0]
         while n:
             der_data = np.gradient(
                 der_data,
-                self.axes_manager[axis].axis,
-                axis=self.axes_manager[axis].index_in_array,
+                axis.axis,
+                axis=axis.index_in_array,
                 **kwargs,
             )
             n -= 1
@@ -4907,7 +5158,10 @@ class BaseSignal(
         <Signal2D, title: , dimensions: (|64, 64)>
 
         """
-        if self.axes_manager[axis].is_binned:
+        axis = self.axes_manager[axis]
+        if isinstance(axis, tuple):
+            axis = axis[0]
+        if axis.is_binned:
             return self.sum(axis=axis, out=out, rechunk=rechunk)
         else:
             return self.integrate_simpson(axis=axis, out=out, rechunk=rechunk)
@@ -5079,9 +5333,6 @@ class BaseSignal(
         Parameters
         ----------
         %s
-        range_bins : tuple or None, optional
-            the minimum and maximum range for the histogram. If
-            `range_bins` is ``None``, (``x.min()``, ``x.max()``) will be used.
         %s
         %s
         %s
@@ -5093,6 +5344,11 @@ class BaseSignal(
         -------
         hist_spec : :class:`~.api.signals.Signal1D`
             A 1D spectrum instance containing the histogram.
+
+        Notes
+        -----
+        See :func:`numpy.histogram` for more details on the
+        meaning of the returned values.
 
         See Also
         --------
@@ -5138,9 +5394,8 @@ class BaseSignal(
             hist_spec.axes_manager[0].offset = bin_edges[0]
             hist_spec.axes_manager[0].size = hist.shape[-1]
 
-        hist_spec.axes_manager[0].name = "value"
-        hist_spec.axes_manager[0].is_binned = True
-        hist_spec.metadata.General.title = self.metadata.General.title + " histogram"
+        _set_histogram_metadata(self, hist_spec, **kwargs)
+
         if out is None:
             return hist_spec
         else:
@@ -5148,9 +5403,9 @@ class BaseSignal(
 
     get_histogram.__doc__ %= (
         HISTOGRAM_BIN_ARGS,
+        HISTOGRAM_RANGE_ARGS,
         HISTOGRAM_MAX_BIN_ARGS,
         OUT_ARG,
-        RECHUNK_ARG,
     )
 
     def map(
@@ -5160,14 +5415,15 @@ class BaseSignal(
         num_workers=None,
         inplace=True,
         ragged=None,
-        navigation_chunks=None,
+        navigation_chunks="auto",
         output_signal_size=None,
         output_dtype=None,
         lazy_output=None,
+        silence_warnings=False,
         **kwargs,
     ):
-        """Apply a function to the signal data at all the navigation
-        coordinates.
+        """
+        Apply a function to the signal data at all the navigation coordinates.
 
         The function must operate on numpy arrays. It is applied to the data at
         each navigation coordinate pixel-py-pixel. Any extra keyword arguments
@@ -5194,18 +5450,18 @@ class BaseSignal(
             first. For example via `image = copy.deepcopy(image)`.
         %s
         %s
-        inplace : bool, default True
-            If ``True``, the data is replaced by the result. Otherwise
-            a new Signal with the results is returned.
+        %s
         ragged : None or bool, default None
             Indicates if the results for each navigation pixel are of identical
             shape (and/or numpy arrays to begin with). If ``None``,
             the output signal will be ragged only if the original signal is ragged.
-        navigation_chunks : str, None, int or tuple of int, default ``None``
-            Set the navigation_chunks argument to a tuple of integers to split
-            the navigation axes into chunks. This can be useful to enable
-            using multiple cores with signals which are less that 100 MB.
-            This argument is passed to :meth:`~._signals.lazy.LazySignal.rechunk`.
+        navigation_chunks : str, or tuple of int, default ``"auto"``
+            Set the ``navigation_chunks`` argument to a tuple of integers to split
+            the navigation axes into chunks, without chunking the signal dimension.
+            If ``"auto"`` and when the data size is less than 100MB * number of cores,
+            the chunking will be optimised to be distributed over the number of cores.
+            This is useful to enable using multiple cores with signals which are
+            less that 100 MB.
         output_signal_size : None, tuple
             Since the size and dtype of the signal dimension of the output
             signal can be different from the input signal, this output signal
@@ -5220,6 +5476,14 @@ class BaseSignal(
             See docstring for output_signal_size for more information.
             Default None.
         %s
+        silence_warnings : bool, str or tuple, list of str
+            If ``True``, don't warn when one of the signal axes are non-uniform,
+            or the scales of the signal axes differ. If ``"non-uniform"``,
+            ``"scales"`` or ``"units"`` are in the list the warning will be
+            silenced when using non-uniform axis, different scales or different
+            units of the signal axes, respectively.
+            If ``False``, all warnings will be added to the logger.
+            Default is ``False``.
         **kwargs : dict
             All extra keyword arguments are passed to the provided function
 
@@ -5294,6 +5558,41 @@ class BaseSignal(
             lazy_output = self._lazy
         if ragged is None:
             ragged = self.ragged
+        if navigation_chunks is None:
+            navigation_chunks = "auto"
+            _logger.warning(
+                "Using `navigaion_chunk=None` is deprecated, "
+                "`navigaion_chunk='auto'` is used instead."
+            )
+        if not isinstance(navigation_chunks, tuple) and navigation_chunks != "auto":
+            raise ValueError(
+                "`navigation_chunks` argument must be a tuple or `'auto'`."
+            )
+
+        if isinstance(silence_warnings, str):
+            silence_warnings = (silence_warnings,)
+
+        if isinstance(silence_warnings, (list, tuple)):
+            for key in silence_warnings:
+                if isinstance(key, str):
+                    if key not in ["non-uniform", "units", "scales"]:
+                        raise ValueError(
+                            f"'{key}' is not a valid string for the "
+                            "`silence_warnings` parameter."
+                        )
+                else:
+                    raise TypeError(
+                        "`silence_warnings` must be a boolean or a list, tuple of string."
+                    )
+
+        def _silence_warnings(silence_warnings, key):
+            # Return True when it should silence warning,
+            # otherwise False
+            # Warn only when `silence_warnings` is False
+            # or when the key is not in `silence_warnings`
+            return silence_warnings is True or (
+                isinstance(silence_warnings, (tuple, list)) and key in silence_warnings
+            )
 
         # Separate arguments to pass to the mapping function:
         # ndkwargs dictionary contains iterating arguments which must be signals.
@@ -5315,12 +5614,12 @@ class BaseSignal(
                     f"with the size of the mapped signal "
                     f"<{self_nav_shape}>"
                 )
-        # TODO: Consider support for non-uniform signal axis
         if any([not ax.is_uniform for ax in self.axes_manager.signal_axes]):
-            _logger.warning(
-                "At least one axis of the signal is non-uniform. Can your "
-                "`function` operate on non-uniform axes?"
-            )
+            if not _silence_warnings(silence_warnings, "non-uniform"):
+                _logger.warning(
+                    "At least one axis of the signal is non-uniform. Can your "
+                    "`function` operate on non-uniform axes?",
+                )
         else:
             # Check if the signal axes have inhomogeneous scales and/or units and
             # display in warning if yes.
@@ -5329,10 +5628,15 @@ class BaseSignal(
             for i in range(len(self.axes_manager.signal_axes)):
                 scale.add(self.axes_manager.signal_axes[i].scale)
                 units.add(self.axes_manager.signal_axes[i].units)
-            if len(units) != 1 or len(scale) != 1:
+            if len(scale) != 1 and not _silence_warnings(silence_warnings, "scales"):
                 _logger.warning(
                     "The function you applied does not take into account "
-                    "the difference of units and of scales in-between axes."
+                    "the difference of scales in-between axes."
+                )
+            if len(units) != 1 and not _silence_warnings(silence_warnings, "units"):
+                _logger.warning(
+                    "The function you applied does not take into account "
+                    "the difference of units in-between axes."
                 )
         # If the function has an axis argument and the signal dimension is 1,
         # we suppose that it can operate on the full array and we don't
@@ -5400,7 +5704,7 @@ class BaseSignal(
         else:
             self.events.data_changed.trigger(obj=self)
 
-    map.__doc__ %= (SHOW_PROGRESSBAR_ARG, LAZY_OUTPUT_ARG, NUM_WORKERS_ARG)
+    map.__doc__ %= (SHOW_PROGRESSBAR_ARG, NUM_WORKERS_ARG, IN_PLACE, LAZY_OUTPUT_ARG)
 
     def _map_all(self, function, inplace=True, **kwargs):
         """
@@ -5443,8 +5747,31 @@ class BaseSignal(
             lazy_output = self._lazy
 
         if not self._lazy:
-            s_input = self.as_lazy()
-            s_input.rechunk(nav_chunks=navigation_chunks)
+            chunks = "auto"
+            if navigation_chunks == "auto":
+                nav_size = self.axes_manager.navigation_size
+                nav_dim = max(self.axes_manager.navigation_dimension, 1)
+                if num_workers is None:
+                    # Get dask current setting, fall back to os.cpu_count
+                    num_workers = dask.config.get("num_workers", os.cpu_count())
+
+                # Optimise chunking for parallel computing if the navigation size is
+                # large enough (5 * num_workers), the data will be split into chunks
+                # else if the data set is large (chunk of 100MB * num_workers)
+                # we keep "auto" chunking
+                if (
+                    nav_size > 5 * num_workers
+                    and self.data.nbytes < 100e6 * num_workers
+                ):
+                    # optimise chunk size to distribute over num_workers
+                    # factor of 5 is to make smaller chunks
+                    chunk_size = nav_size // (num_workers * 5)
+                    navigation_chunks = (int(chunk_size ** (1 / nav_dim)),) * nav_dim
+
+            if isinstance(navigation_chunks, tuple):
+                chunks = navigation_chunks + (-1,) * self.axes_manager.signal_dimension
+
+            s_input = self.as_lazy(chunks=chunks)
         else:
             s_input = self
 
@@ -5474,7 +5801,7 @@ class BaseSignal(
         autodetermine = (
             output_signal_size is None or output_dtype is None
         )  # try to guess output dtype and sig size?
-        if autodetermine and is_cupy_array(self.data):
+        if autodetermine and is_cupy_array(self.data):  # pragma: no cover
             raise ValueError(
                 "Autodetermination of `output_signal_size` and "
                 "`output_dtype` is not supported for cupy array."
@@ -5510,10 +5837,6 @@ class BaseSignal(
 
         axes_changed = len(new_axis) != 0 or len(adjust_chunks) != 0
 
-        if show_progressbar:
-            pbar = ProgressBar()
-            pbar.register()
-
         mapped = da.blockwise(
             process_function_blockwise,
             output_pattern,
@@ -5540,14 +5863,11 @@ class BaseSignal(
                 and (mapped.shape == self.data.shape)
                 and (mapped.dtype == self.data.dtype)
             ):
-                # da.store is used to avoid unnecessary amount of memory usage.
-                # By using it here, the contents in mapped is written directly to
-                # the existing NumPy array, avoiding a potential doubling of memory use.
-                da.store(
-                    mapped,
-                    self.data,
-                    dtype=mapped.dtype,
-                    compute=True,
+                # use `store_to` to minmize memory usage
+                _compute(
+                    array=mapped,
+                    store_to=self.data,
+                    show_progressbar=show_progressbar,
                     num_workers=num_workers,
                 )
                 data_stored = True
@@ -5577,10 +5897,9 @@ class BaseSignal(
         sig._assign_subclass()
 
         if not lazy_output and not data_stored:
-            sig.data = sig.data.compute(num_workers=num_workers)
-
-        if show_progressbar:
-            pbar.unregister()
+            sig.data = _compute(
+                sig.data, show_progressbar=show_progressbar, num_workers=num_workers
+            )
 
         return sig
 
@@ -5666,7 +5985,8 @@ class BaseSignal(
         return copy.deepcopy(self)
 
     def change_dtype(self, dtype, rechunk=False):
-        """Change the data type of a Signal.
+        """
+        Change the data type of a Signal.
 
         Parameters
         ----------
@@ -5687,7 +6007,6 @@ class BaseSignal(
             `signal_dimension` becomes 1.
         %s
 
-
         Examples
         --------
         >>> s = hs.signals.Signal1D([1, 2, 3, 4, 5])
@@ -5697,16 +6016,17 @@ class BaseSignal(
         >>> s.data
         array([1., 2., 3., 4., 5.])
         """
+        if rechunk is True:
+            rechunk = "dask_auto"
         if not isinstance(dtype, np.dtype):
             if dtype in rgb_tools.rgb_dtypes:
                 if self.axes_manager.signal_dimension != 1:
                     raise AttributeError(
-                        "Only 1D signals can be converted " "to RGB images."
+                        "Only 1D signals can be converted to RGB images."
                     )
                 if "8" in dtype and self.data.dtype.name != "uint8":
                     raise AttributeError(
-                        "Only signals with dtype uint8 can be converted to "
-                        "rgb8 images"
+                        "Only signals with dtype uint8 can be converted to rgb8 images"
                     )
                 elif "16" in dtype and self.data.dtype.name != "uint16":
                     raise AttributeError(
@@ -5720,7 +6040,7 @@ class BaseSignal(
                 self.data = rgb_tools.regular_array2rgbx(self.data)
                 self.axes_manager.remove(-1)
                 self.axes_manager._set_signal_dimension(2)
-                self._assign_subclass()
+                self._assign_subclass(chunks=rechunk)
                 if replot:
                     self.plot()
                 return
@@ -5744,15 +6064,15 @@ class BaseSignal(
                 navigate=False,
             )
             self.axes_manager._set_signal_dimension(1)
-            self._assign_subclass()
+            self._assign_subclass(chunks=rechunk)
             if replot:
                 self.plot()
             return
         else:
             self.data = self.data.astype(dtype)
-        self._assign_subclass()
+        self._assign_subclass(chunks=rechunk)
 
-    change_dtype.__doc__ %= RECHUNK_ARG
+    change_dtype.__doc__ %= RECHUNK_ARG.replace('use ``"auto"``', 'use ``"dask_auto"``')
 
     def estimate_poissonian_noise_variance(
         self,
@@ -6166,7 +6486,7 @@ class BaseSignal(
     as_signal1D.__doc__ %= (
         ONE_AXIS_PARAMETER,
         OUT_ARG,
-        OPTIMIZE_ARG.replace("False", "True"),
+        OPTIMIZE_ARG,
     )
 
     def as_signal2D(self, image_axes, out=None, optimize=True):
@@ -6221,9 +6541,9 @@ class BaseSignal(
                 out.data[:] = im.data
             out.events.data_changed.trigger(obj=out)
 
-    as_signal2D.__doc__ %= (OUT_ARG, OPTIMIZE_ARG.replace("False", "True"))
+    as_signal2D.__doc__ %= (OUT_ARG, OPTIMIZE_ARG)
 
-    def _assign_subclass(self):
+    def _assign_subclass(self, chunks=False):
         mp = self.metadata
         self.__class__ = assign_signal_subclass(
             dtype=self.data.dtype,
@@ -6237,10 +6557,11 @@ class BaseSignal(
             mp.Signal.signal_type = self._signal_type  # set to default!
         self.__init__(self.data, full_initialisation=False)
         if self._lazy:
-            self._make_lazy()
+            self.data = self._lazy_data(rechunk=chunks)
 
     def set_signal_type(self, signal_type=""):
-        """Set the signal type and convert the current signal accordingly.
+        """
+        Set the signal type and convert the current signal accordingly.
 
         The ``signal_type`` attribute specifies the type of data that the signal
         contains e.g. electron energy-loss spectroscopy data,
@@ -6253,13 +6574,16 @@ class BaseSignal(
         :class:`~.api.signals.BaseSignal` subclass associated, usually
         providing specific features for the analysis of that type of signal.
 
-        HyperSpy ships with a minimal set of known signal types. External
-        packages can register extra signal types. To print a list of
+        HyperSpy ships only with generic signal types. External packages
+        can register domain-specific signal types, usually associated with
+        specific measurement techniques. To print a list of
         registered signal types in the current installation, call
         :func:`~.api.print_known_signal_types`, and see
         the developer guide for details on how to add new signal_types.
-        A non-exhaustive list of HyperSpy extensions is also maintained
-        here: https://github.com/hyperspy/hyperspy-extensions-list.
+        A non-exhaustive list of HyperSpy extensions is maintained
+        here: https://github.com/hyperspy/hyperspy-extensions-list. See also the
+        `HyperSpy Website <https://hyperspy.org>`_ for an overview of the
+        ecosystem.
 
         Parameters
         ----------
@@ -6280,7 +6604,9 @@ class BaseSignal(
         Examples
         --------
 
-        Let's first print all known signal types:
+        Let's first print all known signal types (assuming the extensions
+        `eXSpy <https://hyperspy.org/exspy>`_ and `holoSpy
+        <https://hyperspy.org/holospy>`_ are installed):
 
         >>> s = hs.signals.Signal1D([0, 1, 2, 3])
         >>> s
@@ -6563,17 +6889,14 @@ class BaseSignal(
     def add_poissonian_noise(self, keep_dtype=True, random_state=None):
         """Add Poissonian noise to the data.
 
-        This method works in-place. The resulting data type is ``int64``.
-        If this is different from the original data type then a warning
-        is added to the log.
+        This method works in-place.
 
         Parameters
         ----------
         keep_dtype : bool, default True
-            If ``True``, keep the original data type of the signal data. For
-            example, if the data type was initially ``'float64'``, the result of
-            the operation (usually ``'int64'``) will be converted to
-            ``'float64'``.
+            This parameter is deprecated and will be removed in HyperSpy 3.0.
+            Currently, it does not have any effect. This method always
+            keeps the original dtype of the signal.
         random_state : None, int or numpy.random.Generator, default None
             Seed for the random generator.
 
@@ -6586,28 +6909,17 @@ class BaseSignal(
         """
         kwargs = {}
         random_state = check_random_state(random_state, lazy=self._lazy)
+        if not keep_dtype:
+            warnings.warn(
+                "The `keep_dtype` parameter is deprecated and will be removed in HyperSpy 3.0.",
+                VisibleDeprecationWarning,
+            )
 
         if self._lazy:
             kwargs["chunks"] = self.data.chunks
 
-        original_dtype = self.data.dtype
-
-        self.data = random_state.poisson(lam=self.data, **kwargs)
-
-        if self.data.dtype != original_dtype:
-            if keep_dtype:
-                _logger.warning(
-                    f"Changing data type from {self.data.dtype} "
-                    f"to the original {original_dtype}"
-                )
-                # Don't change the object if possible
-                self.data = self.data.astype(original_dtype, copy=False)
-            else:
-                _logger.warning(
-                    f"The data type changed from {original_dtype} "
-                    f"to {self.data.dtype}"
-                )
-
+        self.data[:] = random_state.poisson(lam=self.data, **kwargs)
+        self.events.data_changed.trigger(obj=self)
         self.events.data_changed.trigger(obj=self)
 
     def add_gaussian_noise(self, std, random_state=None):
@@ -6648,12 +6960,8 @@ class BaseSignal(
 
         noise = random_state.normal(loc=0, scale=std, size=self.data.shape, **kwargs)
 
-        if self._lazy:
-            # With lazy data we can't keep the same array object
-            self.data = self.data + noise
-        else:
-            # Don't change the object
-            self.data += noise
+        self.data += noise
+        self.events.data_changed.trigger(obj=self)
 
         self.events.data_changed.trigger(obj=self)
 
@@ -6715,7 +7023,7 @@ class BaseSignal(
         """
 
         if self.axes_manager.ragged:
-            raise RuntimeError("Signal with ragged dimension can't be " "transposed.")
+            raise RuntimeError("Signal with ragged dimension can't be transposed.")
 
         am = self.axes_manager
         ax_list = am._axes
@@ -6748,12 +7056,12 @@ class BaseSignal(
                 intersection = set(signal_axes).intersection(navigation_axes)
                 if len(intersection):
                     raise ValueError(
-                        "At least one axis found in both spaces:" " {}".format(
+                        "At least one axis found in both spaces: {}".format(
                             intersection
                         )
                     )
                 if len(am._axes) != (len(signal_axes) + len(navigation_axes)):
-                    raise ValueError("Not all current axes were assigned to a " "space")
+                    raise ValueError("Not all current axes were assigned to a space")
             else:
                 raise ValueError(
                     "navigation_axes has to be None or an iterable"
@@ -6973,8 +7281,7 @@ class BaseSignal(
             mask.shape != self.axes_manager.navigation_shape
         ):
             raise ValueError(
-                "The shape of the navigation mask array must "
-                "match `navigation_shape`."
+                "The shape of the navigation mask array must match `navigation_shape`."
             )
 
     def _check_signal_mask(self, mask):
@@ -7011,7 +7318,7 @@ class BaseSignal(
             mask.shape != self.axes_manager.signal_shape
         ):
             raise ValueError(
-                "The shape of signal mask array must match " "`signal_shape`."
+                "The shape of signal mask array must match `signal_shape`."
             )
 
     def to_device(self):
@@ -7057,6 +7364,141 @@ class BaseSignal(
         if self._lazy:  # pragma: no cover
             raise LazyCupyConversion
         self.data = to_numpy(self.data)
+
+    def remove_spikes(self, threshold_factor=5, axes=None, inplace=True, **kwargs):
+        r"""
+        Remove spikes (intense pixels that may have been generated by X-ray or
+        cosmic ray events) from data.
+        Values fullfilling the following condition will be replaced by their local
+        median:
+
+        .. math::
+
+            \mathrm{value} > \mathrm{median} + \sigma * \mathrm{threshold\_factor}
+
+        where :math:`\sigma` is the standard deviation taken along the given axes.
+
+        The local median is calculated using the :func:`scipy.ndimage.median_filter`
+        function.
+
+        Parameters
+        ----------
+        threshold_factor : int, float
+            Factor used in the thresholding calculation. A higher value will
+            give a higher threshold value to find spikes and less spikes will
+            removed. It must be a positive number. Default is 5.
+        axes : int, str, :class:`~hyperspy.axes.DataAxis` or tuple
+            Specify the axes used for calculating the local median. It is recommended
+            to use axes of similar nature, where the local median is representative
+            of the current value (for example, spatial position of mapped values).
+            ``axes`` can be a single or multiple axes in a tuple. In both cases, the
+            axes can be passed directly, or specified using the index in
+            :attr:`~.api.signals.BaseSignal.axes_manager` or the name of the axis.
+            If ``None``, for :class:`~.api.signals.Signal1D`, the navigation axes are
+            used. For signals with signal dimension >= 2, the signal axes are used.
+            For signals with a signal dimension of 0, all axes are used.
+        inplace : bool, default True
+            If ``True``, the data is replaced by the result. Otherwise,
+            a new Signal with the result is returned.
+        **kwargs : dict
+            Keyword arguments are passed to :func:`scipy.ndimage.median_filter`
+            of :func:`dask_image.ndfilters.median_filter` for lazy signals.
+
+        Returns
+        -------
+        signal : subclass of BaseSignal
+            If ``inplace=False``, the signal with removed spikes.
+
+        See Also
+        --------
+        hyperspy.api.signals.Signal1D.spikes_removal_tool,
+        hyperspy.api.signals.Signal1D.spikes_diagnosis
+
+        Examples
+        --------
+        >>> import hyperspy.api as hs
+        >>> s = hs.data.two_gaussians()
+
+        Add spikes
+
+        >>> s.data[10, 5, 800] = 750
+        >>> s.data[10, 20, 200] = 2000
+        >>> s.data[15, 25, 500] = 50000
+
+        >>> s.remove_spikes()
+
+        With the default ``threshold_factor`` value of 5, the two largest
+        spikes (values of 2000 and 50000) have been removed but not the
+        smallest one (value of 750).
+
+        >>> s.remove_spikes(threshold_factor=3.5)
+
+        Parameters can be passed for the calculation of the median filter
+
+        >>> s.remove_spikes(size=5)
+        """
+        if threshold_factor <= 0:
+            raise ValueError("`threshold_factor` must a positive number.")
+
+        if "origin" in kwargs.keys():
+            raise RuntimeError(
+                "`origin` argument is not supported, use `footprint` instead."
+            )
+        size = kwargs.pop("size", 3)
+        if size % 2 == 0:
+            # Don't support even number to simplify setting footprint
+            raise ValueError("Only odd number are supported for the `size` argument.")
+
+        if np.any(np.isnan(self.data)):
+            raise ValueError("Data containing `nan` are not supported.")
+
+        if axes is not None:
+            axes = self.axes_manager[axes]
+            if not np.iterable(axes):
+                axes = (axes,)
+        else:
+            if self.axes_manager.signal_dimension == 1:
+                # Signal1D, use navigation space
+                axes = self.axes_manager.navigation_axes
+            else:
+                # Signal2D, use signal_axes
+                axes = self.axes_manager.signal_axes
+            if len(axes) == 0:
+                # Use all axes
+                axes = None
+
+        if axes is not None:
+            axes = tuple(axis.index_in_array for axis in axes)
+
+        if self._lazy:
+            try:
+                from dask_image.ndfilters import median_filter
+
+            except ImportError:
+                raise RuntimeError("`dask_image` is required to remove spikes lazily.")
+        else:
+            if is_cupy_array(self.data):  # pragma: no cover
+                from cupyx.scipy.ndimage import median_filter
+            else:
+                from scipy.ndimage import median_filter
+
+        footprint = _get_footprint(self.data, axes=axes, size=size, **kwargs)
+        # Set middle value to False to exclude from the median calculation
+        idx = tuple(size_ // 2 for size_ in footprint.shape)
+        footprint[idx] = False
+
+        med = median_filter(self.data, footprint=footprint, **kwargs)
+        std = np.std(self.data, axis=axes, keepdims=True)
+
+        corrected_data = np.where(
+            np.abs(self.data - med) > std * threshold_factor, med, self.data
+        )
+
+        if inplace:
+            self.data[:] = corrected_data
+            self.events.data_changed.trigger(obj=self)
+        else:
+            return self._deepcopy_with_new_data(corrected_data)
 
 
 ARITHMETIC_OPERATORS = (

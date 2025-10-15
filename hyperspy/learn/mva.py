@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -142,7 +142,7 @@ class MVA:
         ----------
         normalize_poissonian_noise : bool, default False
             If True, scale the signal to normalize Poissonian noise using
-            the approach described in [*].
+            the approach described in [*]_.
         algorithm : str {``"SVD"``, ``"MLPCA"``, ``"sklearn_pca"``, ``"NMF"``, ``"sparse_pca"``,
         ``"mini_batch_sparse_pca"``, ``"RPCA"``, ``"ORPCA"``, ``"ORNMF"``} or object, default ``"SVD"``
             The decomposition algorithm to use. If algorithm is an object,
@@ -241,7 +241,7 @@ class MVA:
             if algorithm == "SVD":
                 if svd_solver == "randomized":
                     raise ValueError(
-                        "`svd_solver='randomized'` is not supported with " "cupy array."
+                        "`svd_solver='randomized'` is not supported with cupy array."
                     )
                 elif svd_solver == "auto":
                     svd_solver = "full"
@@ -793,7 +793,7 @@ class MVA:
                     )
             else:
                 raise ValueError("`mask` must be a HyperSpy signal.")
-
+            mask = mask.deepcopy()  # Avoid changing the original mask
             if hasattr(mask, "compute"):
                 # if the mask is lazy, we compute them, which should be fine
                 # since we already reduce the dimensionality of the data.
@@ -837,7 +837,7 @@ class MVA:
         if algorithm in algorithms_sklearn:
             if is_cupy_array(self.data):  # pragma: no cover
                 raise TypeError(
-                    "cupy arrays are not supported with scikit-learn " "algorithms."
+                    "cupy arrays are not supported with scikit-learn algorithms."
                 )
             if not import_sklearn.sklearn_installed:
                 raise ImportError(f"algorithm='{algorithm}' requires scikit-learn.")
@@ -1424,7 +1424,7 @@ class MVA:
 
         """
         s = self.get_explained_variance_ratio()
-        if is_cupy_array(s.data):
+        if is_cupy_array(s.data):  # pragma: no cover
             s.to_host()
 
         n_max = len(self.learning_results.explained_variance_ratio)
@@ -1437,7 +1437,7 @@ class MVA:
         # Determine right number of components for signal and cutoff value
         if isinstance(threshold, float):
             if not 0 < threshold < 1:
-                raise ValueError("Variance threshold should be between 0 and" " 1")
+                raise ValueError("Variance threshold should be between 0 and 1")
             # Catch if the threshold is less than the minimum variance value:
             if threshold < s.data.min():
                 n_signal_pcs = n
@@ -1599,7 +1599,7 @@ class MVA:
         """Normalize the signal under the assumption of Poisson noise.
 
         Scales the signal using to "normalize" the Poisson data for
-        subsequent decomposition analysis [*].
+        subsequent decomposition analysis [*]_.
 
         Parameters
         ----------

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -26,12 +26,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.ma as ma
 from scipy import ndimage
-
-try:
-    # For scikit-image >= 0.17.0
-    from skimage.registration._phase_cross_correlation import _upsampled_dft
-except ModuleNotFoundError:
-    from skimage.feature.register_translation import _upsampled_dft
+from skimage.registration._phase_cross_correlation import _upsampled_dft
 
 from hyperspy._signals.common_signal2d import CommonSignal2D
 from hyperspy._signals.lazy import LazySignal
@@ -140,8 +135,8 @@ def fft_correlation(in1, in2, normalize=False, real_only=False):
     else:
         fft_f, ifft_f = np.fft.fftn, np.fft.ifftn
 
-    fprod = fft_f(in1, fsize)
-    fprod *= fft_f(in2, fsize).conjugate()
+    fprod = fft_f(in1, fsize, axes=[-2, -1])
+    fprod *= fft_f(in2, fsize, axes=[-2, -1]).conjugate()
 
     if normalize is True:
         fprod = np.nan_to_num(fprod / abs(fprod))
@@ -383,7 +378,7 @@ class Signal2D(BaseSignal, CommonSignal2D):
         for c in autoscale:
             if c not in ["x", "y", "v"]:
                 raise ValueError(
-                    "`autoscale` only accepts 'x', 'y', 'v' as " "valid characters."
+                    "`autoscale` only accepts 'x', 'y', 'v' as valid characters."
                 )
         super().plot(
             navigator=navigator,
@@ -877,8 +872,7 @@ class Signal2D(BaseSignal, CommonSignal2D):
         else:
             if None in (x0, y0, x1, y1, new_length):
                 raise ValueError(
-                    "With interactive=False x0, y0, x1, y1 and new_length "
-                    "must be set."
+                    "With interactive=False x0, y0, x1, y1 and new_length must be set."
                 )
             self._calibrate(x0, y0, x1, y1, new_length, units=units)
 

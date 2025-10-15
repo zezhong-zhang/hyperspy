@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -29,6 +29,7 @@ from hyperspy.axes import (
     _serpentine_iter,
 )
 from hyperspy.defaults_parser import preferences
+from hyperspy.misc.utils import TupleSA
 from hyperspy.signals import BaseSignal, Signal1D, Signal2D
 
 
@@ -116,6 +117,31 @@ class TestAxesManager:
         assert am[-2].offset == am[-1].offset
         assert am[-2].scale == am[-1].scale
 
+    def test_set_attributes(self):
+        am = self.am
+        am.signal_axes.set(name=("kx", "ky"), offset=(1, 2), scale=3, units="nm^{-1}")
+        assert am.signal_axes[0].name == "kx"
+        assert am.signal_axes[1].name == "ky"
+        assert am.signal_axes[0].offset == 1
+        assert am.signal_axes[1].offset == 2
+        assert am.signal_axes[0].scale == 3
+        assert am.signal_axes[1].scale == 3
+        assert am.signal_axes[0].units == "nm^{-1}"
+        assert am.signal_axes[1].units == "nm^{-1}"
+        am.navigation_axes.set(name=("x", "y"), offset=10, scale=(10, 20), units="nm")
+        assert am.navigation_axes[0].name == "x"
+        assert am.navigation_axes[1].name == "y"
+        assert am.navigation_axes[0].offset == 10
+        assert am.navigation_axes[1].offset == 10
+        assert am.navigation_axes[0].scale == 10
+        assert am.navigation_axes[1].scale == 20
+        assert am.navigation_axes[0].units == "nm"
+        assert am.navigation_axes[1].units == "nm"
+        with pytest.raises(AttributeError):
+            am.signal_axes.set(
+                names=("kx", "kx"), offset=(1, 2), scale=3, units="nm^{-1}"
+            )
+
     def test_all_uniform(self):
         assert self.am.all_uniform is True
         self.am[-1].convert_to_non_uniform_axis()
@@ -130,6 +156,13 @@ class TestAxesManager:
         with pytest.raises(ValueError):
             axis = BaseDataAxis()
             am[axis]
+        assert isinstance(am.navigation_axes, TupleSA)
+        assert isinstance(am.signal_axes, TupleSA)
+
+        assert am["nav"] == am.navigation_axes
+        assert isinstance(am["nav"], TupleSA)
+        assert am["sig"] == am.signal_axes
+        assert isinstance(am["nav"], TupleSA)
 
 
 class TestAxesManagerScaleOffset:

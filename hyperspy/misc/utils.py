@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -30,7 +30,9 @@ from operator import attrgetter
 
 import dask.array as da
 import numpy as np
+from tqdm.dask import TqdmCallback
 
+from hyperspy.defaults_parser import preferences
 from hyperspy.docstrings.signal import SHOW_PROGRESSBAR_ARG
 from hyperspy.docstrings.utils import STACK_METADATA_ARG
 from hyperspy.misc.signal_tools import broadcast_signals
@@ -1445,6 +1447,22 @@ def guess_output_signal_size(test_data, function, ragged, **kwargs):
     return output_signal_size, output_dtype
 
 
+def _compute(array, store_to=None, show_progressbar=None, **kwargs):
+    if show_progressbar is None:
+        show_progressbar = preferences.General.show_progressbar
+    # this isn't compatible with distributed scheduler
+    # https://docs.dask.org/en/stable/diagnostics-distributed.html#progress-bar
+    cm = TqdmCallback if show_progressbar else dummy_context_manager
+
+    with cm():
+        if store_to is not None:
+            da.store(
+                array, store_to, dtype=array.dtype, compute=True, lock=False, **kwargs
+            )
+        else:
+            return array.compute(**kwargs)
+
+
 def multiply(iterable):
     """Return product of sequence of numbers.
 
@@ -1639,3 +1657,66 @@ def display(obj):
         display.display(obj)
     except ImportError:
         print(obj)
+
+
+class TupleSA(tuple):
+    """A tuple that can set the attributes of its items"""
+
+    def __getitem__(self, *args, **kwargs):
+        item = super().__getitem__(*args, **kwargs)
+        try:
+            return type(self)(item)
+        except TypeError:
+            # When indexing, the returned object is not a tuple
+            return item
+
+    def set(self, **kwargs):
+        """Set the attributes of its items
+
+        Parameters
+        ----------
+        kwargs : dict
+            The name of the attributes and their values. If a value is iterable,
+            then attribute of each item of the tuple will be set to each of the values.
+        """
+        for key, value in kwargs.items():
+            no_name = [item for item in self if not hasattr(item, key)]
+            if no_name:
+                raise AttributeError(f"'The items {no_name} have not attribute '{key}'")
+            else:
+                if isiterable(value) and not isinstance(value, str):
+                    for item, value_ in zip(self, value):
+                        setattr(item, key, value_)
+                else:
+                    for item in self:
+                        setattr(item, key, value)
+
+    def get(self, *args):
+        """Get the attributes of its items
+
+        Parameters
+        ----------
+        args : list
+            The names of the attributes to get.
+
+        Returns
+        -------
+        output : dict
+            The name of the attributes and their values.
+        """
+        output = dict()
+        for key in args:
+            values = list()
+            for item in self:
+                if not hasattr(item, key):
+                    raise AttributeError(f"'The item {item} has not attribute '{key}'")
+                else:
+                    values.append(getattr(item, key))
+            output[key] = tuple(values)
+        return output
+
+    def __add__(self, *args, **kwargs):
+        return type(self)(super().__add__(*args, **kwargs))
+
+    def __mul__(self, *args, **kwargs):
+        return type(self)(super().__mul__(*args, **kwargs))

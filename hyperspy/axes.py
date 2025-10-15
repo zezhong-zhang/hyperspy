@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2007-2024 The HyperSpy developers
+# Copyright 2007-2025 The HyperSpy developers
 #
 # This file is part of HyperSpy.
 #
@@ -43,7 +43,7 @@ from hyperspy.misc.array_tools import (
     round_half_towards_zero,
 )
 from hyperspy.misc.math_tools import isfloat
-from hyperspy.misc.utils import isiterable, ordinal
+from hyperspy.misc.utils import TupleSA, isiterable, ordinal
 from hyperspy.ui_registry import add_gui_method, get_gui
 
 _logger = logging.getLogger(__name__)
@@ -205,8 +205,7 @@ class UnitConversion:
             return getattr(self, attribute) * _ureg(units)
         else:
             raise ValueError(
-                "`attribute` argument can only take the `scale` "
-                "or the `offset` value."
+                "`attribute` argument can only take the `scale` or the `offset` value."
             )
 
     def _set_quantity(self, value, attribute="scale"):
@@ -228,8 +227,7 @@ class UnitConversion:
             setattr(self, attribute, float(value.magnitude))
         else:
             raise ValueError(
-                "`attribute` argument can only take the `scale` "
-                "or the `offset` value."
+                "`attribute` argument can only take the `scale` or the `offset` value."
             )
 
     @property
@@ -560,9 +558,7 @@ class BaseDataAxis(t.HasTraits):
             if self.is_uniform:
                 value = self._get_value_from_value_with_units(value)
             else:
-                raise ValueError(
-                    "Unit conversion is only supported for " "uniform axis."
-                )
+                raise ValueError("Unit conversion is only supported for uniform axis.")
         else:
             raise ValueError(f"`{value}` is not a suitable string for slicing.")
 
@@ -729,18 +725,93 @@ class BaseDataAxis(t.HasTraits):
             any_changes = True
         return any_changes
 
-    def convert_to_uniform_axis(self):
-        """Convert to an uniform axis."""
-        scale = (self.high_value - self.low_value) / self.size
+    def convert_to_uniform_axis(self, keep_bounds=True, log_scale_error=True):
+        """
+        Convert to an uniform axis.
+
+        Parameters
+        ----------
+        keep_bounds : bool
+            If ``True``, the first and last value of the axis will not be changed.
+            The new scale is calculated by substracting the last value by the first
+            value and dividing by the number of intervals.
+            If ``False``, the scale and offset are calculated using
+            :meth:`numpy.polynomial.polynomial.Polynomial.fit`, which minimises
+            the scale difference over the whole axis range but the bounds of
+            the axis can change (in some cases quite significantly, in particular when the
+            interval width is changing continuously). Default is ``True``.
+        log_scale_error : bool
+            If ``True``, the maximum scale error will be logged as INFO.
+            Default is ``True``.
+
+        Examples
+        --------
+        Using ``keep_bounds=True`` (default):
+
+        >>> s = hs.data.luminescence_signal(uniform=False)
+        >>> print(s.axes_manager)
+        <Axes manager, axes: (|1024)>
+                    Name |   size |  index |  offset |   scale |  units
+        ================ | ====== | ====== | ======= | ======= | ======
+        ---------------- | ------ | ------ | ------- | ------- | ------
+                  Energy |   1024 |      0 | non-uniform axis |     eV
+        >>> s.axes_manager[-1].convert_to_uniform_axis(keep_bounds=True)
+        >>> print(s.axes_manager)
+        <Axes manager, axes: (|1024)>
+                    Name |   size |  index |  offset |   scale |  units
+        ================ | ====== | ====== | ======= | ======= | ======
+        ---------------- | ------ | ------ | ------- | ------- | ------
+                  Energy |   1024 |      0 |     1.6 |  0.0039 |     eV
+
+        Using ``keep_bounds=False``:
+
+        >>> s = hs.data.luminescence_signal(uniform=False)
+        >>> print(s.axes_manager)
+        <Axes manager, axes: (|1024)>
+                    Name |   size |  index |  offset |   scale |  units
+        ================ | ====== | ====== | ======= | ======= | ======
+        ---------------- | ------ | ------ | ------- | ------- | ------
+                  Energy |   1024 |      0 | non-uniform axis |     eV
+        >>> s.axes_manager[-1].convert_to_uniform_axis(keep_bounds=False)
+        >>> print(s.axes_manager)
+        <Axes manager, axes: (|1024)>
+                    Name |   size |  index |  offset |   scale |  units
+        ================ | ====== | ====== | ======= | ======= | ======
+        ---------------- | ------ | ------ | ------- | ------- | ------
+                  Energy |   1024 |      0 |     1.1 |  0.0033 |     eV
+
+
+        See Also
+        --------
+        hyperspy.api.signals.BaseSignal.interpolate_on_axis
+
+        Notes
+        -----
+        The function only converts the axis type and doesn't interpolate
+        the data itself - see :meth:`~.api.signals.BaseSignal.interpolate_on_axis`
+        to interpolate data on a uniform axis.
+
+        """
+        indices = np.arange(self.size)
+        if keep_bounds:
+            scale = (self.axis[-1] - self.axis[0]) / (self.size - 1)
+            offset = self.axis[0]
+        else:
+            # polyfit minimize the error over the whole axis
+            offset, scale = np.polynomial.Polynomial.fit(
+                indices, self.axis, deg=1
+            ).convert()
         d = self.get_axis_dictionary()
         axes_manager = self.axes_manager
-        del d["axis"]
-        if len(self.axis) > 1:
-            scale_err = max(self.axis[1:] - self.axis[:-1]) - scale
-            _logger.warning("The maximum scale error is {}.".format(scale_err))
+        if "axis" in d:
+            del d["axis"]
+        if len(self.axis) > 1 and log_scale_error:
+            scale_err = np.max(self.axis - (scale * indices + offset))
+            _logger.info("The maximum scale error is {}.".format(scale_err))
         d["_type"] = "UniformDataAxis"
+        d["size"] = self.size
         self.__class__ = UniformDataAxis
-        self.__init__(**d, size=self.size, scale=scale, offset=self.low_value)
+        self.__init__(**d, scale=scale, offset=offset)
         self.axes_manager = axes_manager
 
     @property
@@ -1501,8 +1572,6 @@ class AxesManager(t.HasTraits):
     """
 
     _axes = t.List(BaseDataAxis)
-    signal_axes = t.Tuple()
-    navigation_axes = t.Tuple()
     _step = t.Int(1)
 
     def __init__(self, axes_list):
@@ -1592,10 +1661,16 @@ class AxesManager(t.HasTraits):
     def __getitem__(self, y):
         """x.__getitem__(y) <==> x[y]"""
         if isinstance(y, str) or not np.iterable(y):
-            return self[(y,)][0]
-        axes = [self._axes_getter(ax) for ax in y]
+            if y == "nav":
+                axes = self.navigation_axes
+            elif y == "sig":
+                axes = self.signal_axes
+            else:
+                return self[(y,)][0]
+        else:
+            axes = [self._axes_getter(ax) for ax in y]
         _, indices = np.unique([_id for _id in map(id, axes)], return_index=True)
-        ans = tuple(axes[i] for i in sorted(indices))
+        ans = TupleSA(axes[i] for i in sorted(indices))
         return ans
 
     def _axes_getter(self, y):
@@ -1618,7 +1693,7 @@ class AxesManager(t.HasTraits):
             and not y.imag.is_integer()
         ):
             raise TypeError(
-                "axesmanager indices must be integers, " "complex integers or strings"
+                "axesmanager indices must be integers, complex integers or strings"
             )
         if y.imag == 0:  # Natural order
             return self._get_axes_in_natural_order()[y]
@@ -1632,7 +1707,7 @@ class AxesManager(t.HasTraits):
             return self.signal_axes[int(y.real)]
         else:
             raise IndexError(
-                "axesmanager imaginary part of complex indices " "must be 0, 1, 2 or 3"
+                "axesmanager imaginary part of complex indices must be 0, 1, 2 or 3"
             )
 
     def __getslice__(self, i=None, j=None):
@@ -2120,13 +2195,21 @@ class AxesManager(t.HasTraits):
 
     @property
     def signal_axes(self):
-        """The signal axes as a tuple."""
-        return self._signal_axes
+        """The signal axes as a TupleSA.
+
+        A TupleSA object is a tuple with a `set` method
+        to easily set the attributes of its items.
+        """
+        return TupleSA(self._signal_axes)
 
     @property
     def navigation_axes(self):
-        """The navigation axes as a tuple."""
-        return self._navigation_axes
+        """The navigation axes as a TupleSA.
+
+        A TupleSA object is a tuple with a `set` method
+        to easily set the attributes of its items.
+        """
+        return TupleSA(self._navigation_axes)
 
     @property
     def signal_shape(self):
@@ -2167,7 +2250,7 @@ class AxesManager(t.HasTraits):
             return
         elif self.ragged and value > 0:
             raise ValueError(
-                "Signal containing ragged array " "must have zero signal dimension."
+                "Signal containing ragged array must have zero signal dimension."
             )
         elif value > len(self._axes):
             raise ValueError(
